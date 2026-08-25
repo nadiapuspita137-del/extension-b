@@ -1,0 +1,157 @@
+<!doctype html>
+<html lang="id">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>BNS Validator</title>
+    <link rel="stylesheet" href="popup.css" />
+  </head>
+  <body>
+    <main class="app-shell">
+      <header class="hero">
+        <div class="brand-lockup">
+          <img class="brand-icon" src="icons/icon48.png" alt="" width="48" height="48" />
+          <div>
+            <p class="eyebrow">LOCAL · READ-ONLY</p>
+            <h1>BNS Validator</h1>
+            <p class="subtitle">DP / WD / SCB live snapshot</p>
+          </div>
+        </div>
+        <span class="privacy-badge">Data tetap di browser</span>
+      </header>
+
+      <section class="snapshot-grid" aria-label="Status snapshot">
+        <article class="snapshot-card" data-snapshot="dp">
+          <div class="snapshot-title"><span class="dataset-dot dp"></span>DP</div>
+          <strong id="dp-count">Belum diambil</strong>
+          <span id="dp-time">—</span>
+        </article>
+        <article class="snapshot-card" data-snapshot="wd">
+          <div class="snapshot-title"><span class="dataset-dot wd"></span>WD</div>
+          <strong id="wd-count">Belum diambil</strong>
+          <span id="wd-time">—</span>
+        </article>
+        <article class="snapshot-card" data-snapshot="scb">
+          <div class="snapshot-title"><span class="dataset-dot scb"></span>SCB</div>
+          <strong id="scb-count">Belum diambil</strong>
+          <span id="scb-time">—</span>
+        </article>
+      </section>
+
+      <div id="notice" class="notice neutral" role="status" aria-live="polite">
+        Klik Scan All untuk mengambil DP, WD, dan SCB sekaligus.
+      </div>
+
+      <section class="primary-actions" aria-label="Aksi utama">
+        <button id="scan-all-button" class="button primary" type="button">Scan All + Validate</button>
+        <button id="scan-button" class="button secondary" type="button">Scan Active Page</button>
+        <button id="validate-button" class="button ghost" type="button">Run Validation</button>
+        <button id="view-bns-button" class="button ghost" type="button">View BNS</button>
+      </section>
+
+      <section class="stop-section" aria-labelledby="stop-heading">
+        <div class="section-heading">
+          <div>
+            <p class="eyebrow">PENGECUALIAN</p>
+            <h2 id="stop-heading">Stop BNS / SB</h2>
+          </div>
+          <span id="stop-bns-count" class="muted">0 ID tersimpan</span>
+        </div>
+        <p class="section-copy">Satu ID per baris. ID yang seharusnya BNS akan diberi status STOP BNS.</p>
+        <textarea id="stop-bns-input" rows="3" placeholder="user001&#10;user025"></textarea>
+        <div class="stop-actions">
+          <button id="save-stop-bns-button" class="button secondary small" type="button">Save Stop BNS</button>
+          <button id="clear-stop-bns-button" class="button ghost small" type="button">Clear List</button>
+          <span id="stop-bns-time" class="muted">Belum disimpan</span>
+        </div>
+      </section>
+
+      <section class="audit-section" aria-labelledby="audit-heading">
+        <div class="section-heading">
+          <div>
+            <p class="eyebrow">AUDIT SUMMARY</p>
+            <h2 id="audit-heading">Validation</h2>
+          </div>
+          <span id="validation-time" class="muted">Belum dijalankan</span>
+        </div>
+
+        <div class="stats-grid">
+          <div class="stat"><span>DP raw</span><strong id="stat-raw">—</strong></div>
+          <div class="stat accent"><span>Eligible</span><strong id="stat-eligible">—</strong></div>
+          <div class="stat"><span>&lt; 50k</span><strong id="stat-below">—</strong></div>
+          <div class="stat"><span>≥ 500k</span><strong id="stat-above">—</strong></div>
+          <div class="stat danger"><span>BNS</span><strong id="stat-bns">—</strong></div>
+          <div class="stat stopped"><span>Stop BNS</span><strong id="stat-stop">—</strong></div>
+          <div class="stat"><span>Found WD</span><strong id="stat-wd">—</strong></div>
+          <div class="stat"><span>Found SCB</span><strong id="stat-scb">—</strong></div>
+          <div class="stat"><span>WD + SCB</span><strong id="stat-both">—</strong></div>
+        </div>
+        <p id="invalid-summary" class="invalid-summary"></p>
+      </section>
+
+      <section id="results-section" class="results-section" aria-labelledby="results-heading">
+        <div class="section-heading result-heading">
+          <div>
+            <p class="eyebrow">TRANSACTION VIEW</p>
+            <h2 id="results-heading">Hasil</h2>
+          </div>
+          <span id="visible-count" class="result-count">0 transaksi</span>
+        </div>
+
+        <div class="result-tools">
+          <label>
+            <span>Filter</span>
+            <select id="status-filter">
+              <option value="ALL">All</option>
+              <option value="BNS">BNS</option>
+              <option value="STOP_BNS">Stop BNS / SB</option>
+              <option value="FOUND_WD">Found in WD</option>
+              <option value="FOUND_SCB">Found in SCB</option>
+            </select>
+          </label>
+          <label>
+            <span>Sort</span>
+            <select id="result-sort">
+              <option value="ORIGINAL">Urutan tabel</option>
+              <option value="ID_DESC">ID terbesar → terkecil</option>
+              <option value="ID_ASC">ID terkecil → terbesar</option>
+              <option value="DP_DESC">DP terbesar → terkecil</option>
+              <option value="DP_ASC">DP terkecil → terbesar</option>
+            </select>
+          </label>
+          <label class="search-field">
+            <span>Search username</span>
+            <input id="username-search" type="search" placeholder="contoh: user001" autocomplete="off" />
+          </label>
+        </div>
+
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>Username</th>
+                <th>DP</th>
+                <th>Date/Time</th>
+                <th>Status</th>
+              </tr>
+            </thead>
+            <tbody id="results-body"></tbody>
+          </table>
+          <p id="empty-results" class="empty-results">Jalankan validasi untuk melihat hasil.</p>
+        </div>
+
+        <div class="copy-actions">
+          <button id="copy-usernames-button" class="button secondary small" type="button">Copy BNS Usernames</button>
+          <button id="copy-details-button" class="button ghost small" type="button">Copy BNS Full Detail</button>
+        </div>
+      </section>
+
+      <footer>
+        <span>Tanpa backend · Stop BNS tetap tersimpan saat snapshot dibersihkan</span>
+        <button id="clear-button" class="clear-button" type="button">Clear All Snapshot</button>
+      </footer>
+    </main>
+
+    <script type="module" src="popup.js"></script>
+  </body>
+</html>
