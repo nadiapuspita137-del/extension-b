@@ -1,7 +1,13 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 
-import { normalizeAmount, normalizeExtractedRows, normalizeUsername } from "../core/normalize.js";
+import {
+  isDailyBonusToBank,
+  isManualDepositToBank,
+  normalizeAmount,
+  normalizeExtractedRows,
+  normalizeUsername
+} from "../core/normalize.js";
 
 test("normalizeUsername trims and compares case-insensitively", () => {
   assert.equal(normalizeUsername(" USER123 "), "user123");
@@ -23,6 +29,12 @@ test("normalizeAmount handles decimal notation and rejects missing values", () =
   assert.equal(normalizeAmount("Rp -"), null);
 });
 
+test("To Bank rules split manual DP from internal SCB bonus payments", () => {
+  assert.equal(isDailyBonusToBank("SCB\nSCB A BONUS DEPOSIT HARIAN\n01"), true);
+  assert.equal(isManualDepositToBank("SCB\nSCB A BONUS DEPOSIT HARIAN\n01"), false);
+  assert.equal(isManualDepositToBank("PrabuPay\nmerchant\naccount"), true);
+});
+
 test("normalizeExtractedRows reports invalid amounts without crashing", () => {
   const normalized = normalizeExtractedRows([
     { username: " UserA ", amountText: "75.000", datetime: "now" },
@@ -31,6 +43,15 @@ test("normalizeExtractedRows reports invalid amounts without crashing", () => {
 
   assert.equal(normalized.invalidAmounts, 1);
   assert.deepEqual(normalized.rows, [
-    { username: "UserA", usernameKey: "usera", amount: 75_000, datetime: "now" }
+    {
+      username: "UserA",
+      usernameKey: "usera",
+      amount: 75_000,
+      datetime: "now",
+      reference: "",
+      rrn: "",
+      toBank: "",
+      rowNumber: ""
+    }
   ]);
 });

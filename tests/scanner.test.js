@@ -60,21 +60,29 @@ test("DP detection uses IsABD/RRN and extracts by header name, not fixed index",
   assert.deepEqual({ ...response.rows[0] }, {
     username: "UserA",
     amountText: "Rp50.000",
-    datetime: "25/08/2026 12:30"
+    datetime: "25/08/2026 12:30",
+    reference: "",
+    rrn: "abc",
+    toBank: "",
+    rowNumber: ""
   });
-  assert.deepEqual({ ...response.source.columns }, { username: 3, amount: 1, datetime: 0 });
+  assert.deepEqual(
+    { ...response.source.columns },
+    { username: 3, amount: 1, datetime: 0, reference: -1, rrn: 2, toBank: -1 }
+  );
 });
 
 test("SCB detection uses Edited By and AddCreditHistory action", () => {
   const response = scan({
-    headers: ["User Name", "Edited By", "Date/Time", "Deposit"],
-    values: ["userB", "staff", "25/08/2026", "75,000"],
+    headers: ["User Name", "To Bank", "Edited By", "Date/Time", "Deposit"],
+    values: ["userB", "SCB\nSCB A BONUS DEPOSIT HARIAN\n01", "staff", "25/08/2026", "75,000"],
     url: "https://panel.example/AddCreditHistory2.aspx",
     action: "./AddCreditHistory2.aspx"
   });
 
   assert.equal(response.pageType, "SCB");
   assert.equal(response.rows[0].username, "userB");
+  assert.match(response.rows[0].toBank, /BONUS DEPOSIT HARIAN/);
 });
 
 test("WD detection prefers Withdraw Amount header", () => {

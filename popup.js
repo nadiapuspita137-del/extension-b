@@ -1,13 +1,21 @@
-import { normalizeExtractedRows, normalizeUsername } from "./core/normalize.js";
+import {
+  isDailyBonusToBank,
+  isManualDepositToBank,
+  normalizeExtractedRows,
+  normalizeUsername
+} from "./core/normalize.js";
 import { STATUS, validateSnapshots } from "./core/validator.js";
 import { sortTransactions } from "./core/sort.js";
 import { configuredPageType, PANEL_TAB_PATTERN, PANEL_TYPES, PANEL_URLS } from "./core/panels.js";
+import { BONUS_STATUS, buildBonusQueue } from "./core/bonus.js";
+import { AUDIT_ISSUE, AUDIT_STATUS, auditBonusPayments } from "./core/audit.js";
+import { mergePageResponses } from "./core/pagination.js";
 import {
   clearAllData,
   loadState,
+  saveDerivedResults,
   saveSnapshot,
-  saveStopBns,
-  saveValidation
+  saveStopBns
 } from "./core/storage.js";
 
 const SCAN_TIMEOUT_MS = 25_000;
@@ -35,7 +43,34 @@ const elements = {
   stopBnsCount: document.querySelector("#stop-bns-count"),
   stopBnsTime: document.querySelector("#stop-bns-time"),
   saveStopBnsButton: document.querySelector("#save-stop-bns-button"),
-  clearStopBnsButton: document.querySelector("#clear-stop-bns-button")
+  clearStopBnsButton: document.querySelector("#clear-stop-bns-button"),
+  bonusGeneratedTime: document.querySelector("#bonus-generated-time"),
+  bonusFilter: document.querySelector("#bonus-filter"),
+  bonusSort: document.querySelector("#bonus-sort"),
+  bonusResultsBody: document.querySelector("#bonus-results-body"),
+  emptyBonusResults: document.querySelector("#empty-bonus-results"),
+  nextBonusUsername: document.querySelector("#next-bonus-username"),
+  nextBonusDp: document.querySelector("#next-bonus-dp"),
+  nextBonusAmount: document.querySelector("#next-bonus-amount"),
+  copyNextIdButton: document.querySelector("#copy-next-id-button"),
+  copyNextBonusButton: document.querySelector("#copy-next-bonus-button"),
+  copyReadyQueueButton: document.querySelector("#copy-ready-queue-button"),
+  botStartButton: document.querySelector("#bot-start-button"),
+  botStopButton: document.querySelector("#bot-stop-button"),
+  botStatusBadge: document.querySelector("#bot-status-badge"),
+  botCurrentId: document.querySelector("#bot-current-id"),
+  botCurrentAmount: document.querySelector("#bot-current-amount"),
+  botCompletedCount: document.querySelector("#bot-completed-count"),
+  botStage: document.querySelector("#bot-stage"),
+  paymentAuditTime: document.querySelector("#payment-audit-time"),
+  paymentAuditFilter: document.querySelector("#payment-audit-filter"),
+  paymentAuditSort: document.querySelector("#payment-audit-sort"),
+  paymentAuditBody: document.querySelector("#payment-audit-body"),
+  emptyPaymentAudit: document.querySelector("#empty-payment-audit"),
+  copyAuditIssuesButton: document.querySelector("#copy-audit-issues-button"),
+  auditExpectedTotal: document.querySelector("#audit-expected-total"),
+  auditActualTotal: document.querySelector("#audit-actual-total"),
+  auditDifference: document.querySelector("#audit-difference")
 };
 
 const statElements = {
@@ -48,6 +83,29 @@ const statElements = {
   foundWd: document.querySelector("#stat-wd"),
   foundScb: document.querySelector("#stat-scb"),
   foundWdAndScb: document.querySelector("#stat-both")
+};
+
+const bonusStatElements = {
+  uniqueDp: document.querySelector("#bonus-stat-unique"),
+  inRange: document.querySelector("#bonus-stat-range"),
+  ready: document.querySelector("#bonus-stat-ready"),
+  alreadyInHistory: document.querySelector("#bonus-stat-history"),
+  foundWd: document.querySelector("#bonus-stat-wd"),
+  foundWdAndHistory: document.querySelector("#bonus-stat-both"),
+  stopBns: document.querySelector("#bonus-stat-stop"),
+  outOfRangeBelow: document.querySelector("#bonus-stat-below"),
+  outOfRangeAbove: document.querySelector("#bonus-stat-above")
+};
+
+const auditStatElements = {
+  correct: document.querySelector("#audit-stat-correct"),
+  issues: document.querySelector("#audit-stat-issues"),
+  missing: document.querySelector("#audit-stat-missing"),
+  doubleBonus: document.querySelector("#audit-stat-double"),
+  overpaid: document.querySelector("#audit-stat-over"),
+  underpaid: document.querySelector("#audit-stat-under"),
+  noDp: document.querySelector("#audit-stat-no-dp"),
+  ruleViolations: document.querySelector("#audit-stat-rule")
 };
 
 const numberFormatter = new Intl.NumberFormat("id-ID", { maximumFractionDigits: 2 });
@@ -92,7 +150,13 @@ function renderSnapshots() {
     const count = document.querySelector(`#${key}-count`);
     const time = document.querySelector(`#${key}-time`);
     if (snapshot) {
-      count.textContent = `${numberFormatter.format(snapshot.rows.length)} rows`;
+      if (key === "dp") {
+        count.textContent = `${numberFormatter.format(snapshot.rows.length)} QRIS DP`;
+      } else if (key === "scb") {
+        count.textContent = `${numberFormatter.format(snapshot.rows.length)} bonus · ${numberFormatter.format(snapshot.manualDepositRows?.length ?? 0)} manual DP`;
+      } else {
+        count.textContent = `${numberFormatter.format(snapshot.rows.length)} rows`;
+      }
       time.textContent = `Updated ${formatTimestamp(snapshot.capturedAt)}`;
     } else {
       count.textContent = "Belum diambil";
@@ -202,10 +266,236 @@ function renderValidation() {
   renderResults();
 }
 
+function bonusStatusLabel(status) {
+  return {
+    [BONUS_STATUS.READY]: "READY",
+    [BONUS_STATUS.FOUND_WD]: "FOUND WD",
+    [BONUS_STATUS.ALREADY_IN_HISTORY]: "IN HISTORY",
+    [BONUS_STATUS.FOUND_WD_AND_HISTORY]: "WD + HISTORY",
+    [BONUS_STATUS.STOP_BNS]: "STOP BNS",
+    [BONUS_STATUS.OUT_OF_RANGE_BELOW]: "MAX < 50K",
+    [BONUS_STATUS.OUT_OF_RANGE_ABOVE]: "MAX ≥ 500K"
+  }[status] || status;
+}
+
+function bonusStatusClass(status) {
+  return {
+    [BONUS_STATUS.READY]: "status-ready",
+    [BONUS_STATUS.FOUND_WD]: "status-wd",
+    [BONUS_STATUS.ALREADY_IN_HISTORY]: "status-history",
+    [BONUS_STATUS.FOUND_WD_AND_HISTORY]: "status-both",
+    [BONUS_STATUS.STOP_BNS]: "status-stop",
+    [BONUS_STATUS.OUT_OF_RANGE_BELOW]: "status-range",
+    [BONUS_STATUS.OUT_OF_RANGE_ABOVE]: "status-range"
+  }[status] || "status-both";
+}
+
+function bonusFilterMatches(row, filter) {
+  if (filter === "ALL") return true;
+  if (filter === "OUT_OF_RANGE") {
+    return row.status === BONUS_STATUS.OUT_OF_RANGE_BELOW || row.status === BONUS_STATUS.OUT_OF_RANGE_ABOVE;
+  }
+  if (filter === BONUS_STATUS.FOUND_WD) {
+    return row.status === BONUS_STATUS.FOUND_WD || row.status === BONUS_STATUS.FOUND_WD_AND_HISTORY;
+  }
+  if (filter === BONUS_STATUS.ALREADY_IN_HISTORY) {
+    return row.status === BONUS_STATUS.ALREADY_IN_HISTORY || row.status === BONUS_STATUS.FOUND_WD_AND_HISTORY;
+  }
+  return row.status === filter;
+}
+
+function getSortedReadyBonusRows() {
+  const ready = (state.bonusQueue?.rows ?? []).filter((row) => row.status === BONUS_STATUS.READY);
+  return sortTransactions(ready, elements.bonusSort.value);
+}
+
+function getVisibleBonusRows() {
+  const rows = state.bonusQueue?.rows ?? [];
+  const filtered = rows.filter((row) => bonusFilterMatches(row, elements.bonusFilter.value));
+  return sortTransactions(filtered, elements.bonusSort.value);
+}
+
+function renderBonusQueue() {
+  const queue = state.bonusQueue;
+  const stats = queue?.stats;
+
+  for (const [key, element] of Object.entries(bonusStatElements)) {
+    element.textContent = stats ? numberFormatter.format(stats[key] ?? 0) : "—";
+  }
+  elements.bonusGeneratedTime.textContent = queue
+    ? `Generated ${formatTimestamp(queue.generatedAt)}`
+    : "Belum dibuat";
+
+  const readyRows = getSortedReadyBonusRows();
+  const next = readyRows[0];
+  elements.nextBonusUsername.textContent = next?.username ?? "—";
+  elements.nextBonusDp.textContent = next ? numberFormatter.format(next.maximumDp) : "—";
+  elements.nextBonusAmount.textContent = next ? numberFormatter.format(next.bonusAmount) : "—";
+  elements.copyNextIdButton.disabled = !next;
+  elements.copyNextBonusButton.disabled = !next;
+  elements.copyReadyQueueButton.disabled = readyRows.length === 0;
+
+  elements.bonusResultsBody.replaceChildren();
+  const visible = getVisibleBonusRows();
+  elements.emptyBonusResults.hidden = visible.length > 0;
+  elements.emptyBonusResults.textContent = queue
+    ? "Tidak ada ID untuk filter queue ini."
+    : "Scan dan jalankan validation untuk membuat antrean.";
+
+  for (const item of visible) {
+    const row = document.createElement("tr");
+    appendCell(row, item.username);
+    appendCell(row, numberFormatter.format(item.maximumDp));
+    appendCell(row, item.bonusAmount === null ? "—" : numberFormatter.format(item.bonusAmount));
+    appendCell(row, numberFormatter.format(item.transactionCount));
+    const statusCell = appendCell(row, "");
+    const pill = document.createElement("span");
+    pill.className = `status-pill ${bonusStatusClass(item.status)}`;
+    pill.textContent = bonusStatusLabel(item.status);
+    statusCell.appendChild(pill);
+    elements.bonusResultsBody.appendChild(row);
+  }
+}
+
+function auditIssueLabel(issue) {
+  return {
+    [AUDIT_ISSUE.DOUBLE_BONUS]: "DOUBLE",
+    [AUDIT_ISSUE.OVERPAID]: "NOMINAL LEBIH",
+    [AUDIT_ISSUE.UNDERPAID]: "NOMINAL KURANG",
+    [AUDIT_ISSUE.NO_DP]: "TANPA DP",
+    [AUDIT_ISSUE.OUT_OF_RANGE_BELOW]: "MAX < 50K",
+    [AUDIT_ISSUE.OUT_OF_RANGE_ABOVE]: "MAX ≥ 500K",
+    [AUDIT_ISSUE.FOUND_WD]: "ADA WD",
+    [AUDIT_ISSUE.STOP_BNS]: "STOP BNS",
+    [AUDIT_ISSUE.MISSING_BONUS]: "BELUM DIBAGI"
+  }[issue] || issue;
+}
+
+function auditFilterMatches(row, filter) {
+  if (filter === "ALL") return true;
+  if (filter === "PROBLEM") return row.status !== AUDIT_STATUS.CORRECT;
+  if (filter === "CORRECT") return row.status === AUDIT_STATUS.CORRECT;
+  if (filter === "MISSING") return row.status === AUDIT_STATUS.MISSING;
+  if (filter === "INVALID_RULE") {
+    return row.issues.some((issue) => [
+      AUDIT_ISSUE.NO_DP,
+      AUDIT_ISSUE.OUT_OF_RANGE_BELOW,
+      AUDIT_ISSUE.OUT_OF_RANGE_ABOVE,
+      AUDIT_ISSUE.FOUND_WD,
+      AUDIT_ISSUE.STOP_BNS
+    ].includes(issue));
+  }
+  return row.issues.includes(filter);
+}
+
+function getVisibleAuditRows() {
+  const rows = state.bonusAudit?.rows ?? [];
+  return sortTransactions(
+    rows.filter((row) => auditFilterMatches(row, elements.paymentAuditFilter.value)),
+    elements.paymentAuditSort.value
+  );
+}
+
+function renderPaymentAudit() {
+  const audit = state.bonusAudit;
+  const stats = audit?.stats;
+  auditStatElements.correct.textContent = stats ? numberFormatter.format(stats.correct) : "—";
+  auditStatElements.issues.textContent = stats ? numberFormatter.format(stats.issueRows + stats.missing) : "—";
+  auditStatElements.missing.textContent = stats ? numberFormatter.format(stats.missing) : "—";
+  auditStatElements.doubleBonus.textContent = stats ? numberFormatter.format(stats.doubleBonus) : "—";
+  auditStatElements.overpaid.textContent = stats ? numberFormatter.format(stats.overpaid) : "—";
+  auditStatElements.underpaid.textContent = stats ? numberFormatter.format(stats.underpaid) : "—";
+  auditStatElements.noDp.textContent = stats ? numberFormatter.format(stats.noDp) : "—";
+  auditStatElements.ruleViolations.textContent = stats ? numberFormatter.format(stats.ruleViolations) : "—";
+  elements.paymentAuditTime.textContent = audit ? `Generated ${formatTimestamp(audit.generatedAt)}` : "Belum dibuat";
+  elements.auditExpectedTotal.textContent = stats ? numberFormatter.format(stats.expectedTotal) : "—";
+  elements.auditActualTotal.textContent = stats ? numberFormatter.format(stats.actualTotal) : "—";
+  elements.auditDifference.textContent = stats
+    ? `${stats.difference > 0 ? "+" : ""}${numberFormatter.format(stats.difference)}`
+    : "—";
+  elements.auditDifference.style.color = !stats || stats.difference === 0
+    ? ""
+    : stats.difference > 0 ? "#a53939" : "#7754a3";
+
+  const rows = getVisibleAuditRows();
+  elements.paymentAuditBody.replaceChildren();
+  elements.emptyPaymentAudit.hidden = rows.length > 0;
+  elements.emptyPaymentAudit.textContent = audit
+    ? "Tidak ada data untuk filter audit ini."
+    : "Scan dan jalankan validation untuk membuat audit.";
+  elements.copyAuditIssuesButton.disabled = !(audit?.rows ?? []).some((row) => row.status !== AUDIT_STATUS.CORRECT);
+
+  for (const item of rows) {
+    const row = document.createElement("tr");
+    appendCell(row, item.username);
+    appendCell(row, item.maximumDp === null ? "—" : numberFormatter.format(item.maximumDp));
+    appendCell(row, item.expectedBonus === null ? "—" : numberFormatter.format(item.expectedBonus));
+    appendCell(row, numberFormatter.format(item.actualTotal));
+    appendCell(row, numberFormatter.format(item.actualTransactionCount));
+    const issueCell = appendCell(row, "");
+    const findings = item.status === AUDIT_STATUS.CORRECT ? ["BENAR"] : item.issues.map(auditIssueLabel);
+    for (const finding of findings) {
+      const pill = document.createElement("span");
+      pill.className = `status-pill ${item.status === AUDIT_STATUS.CORRECT ? "status-ready" : item.status === AUDIT_STATUS.MISSING ? "status-stop" : "status-bns"}`;
+      pill.textContent = finding;
+      pill.style.margin = "0 3px 3px 0";
+      issueCell.appendChild(pill);
+    }
+    elements.paymentAuditBody.appendChild(row);
+  }
+}
+
+function botStageLabel(botState) {
+  const labels = {
+    STARTING: "Menyiapkan bot…",
+    NAVIGATING: "Membuka form Deposit Manual…",
+    BANK_POSTBACK: "To Bank dipilih; menunggu panel memuat ulang…",
+    READY_TO_SUBMIT: "Form sudah terisi. Cek lalu klik final Submit pada panel.",
+    SUBMIT_CLICKED: "Submit diklik admin; menunggu panel selesai lalu membuka ID berikutnya…",
+    ADVANCING: "Membuka ID berikutnya tanpa verifikasi otomatis…",
+    NEXT: "Membuka ID berikutnya…",
+    FORM_ERROR: "Form tidak dapat disiapkan.",
+    VERIFY_FAILED: "State versi lama. Klik BOT ON untuk melewati ID yang sudah disubmit.",
+    COMPLETE: "Semua ID READY selesai diproses. Jalankan Scan/Validate manual.",
+    STOPPED: "Bot dihentikan admin."
+  };
+  return labels[botState?.stage] || "Bot belum dijalankan.";
+}
+
+function renderBotState() {
+  const bot = state.botState;
+  const active = Boolean(bot?.active);
+  const hasError = Boolean(bot?.error) || ["FORM_ERROR", "VERIFY_FAILED"].includes(bot?.stage);
+  elements.botStatusBadge.textContent = active ? "ON" : hasError ? "ERROR" : "OFF";
+  elements.botStatusBadge.className = `bot-status-badge ${active ? "on" : hasError ? "error" : "off"}`;
+  elements.botCurrentId.textContent = bot?.current?.username ?? "—";
+  elements.botCurrentAmount.textContent = Number.isFinite(bot?.current?.bonusAmount)
+    ? numberFormatter.format(bot.current.bonusAmount)
+    : "—";
+  elements.botCompletedCount.textContent = numberFormatter.format(bot?.completedCount ?? 0);
+  elements.botStage.textContent = bot?.error || botStageLabel(bot);
+  elements.botStartButton.disabled = active || !state.bonusQueue?.stats?.ready;
+  elements.botStopButton.disabled = !active;
+
+  for (const button of [
+    elements.scanAllButton,
+    elements.scanButton,
+    elements.validateButton,
+    elements.saveStopBnsButton,
+    elements.clearStopBnsButton,
+    elements.clearButton
+  ]) {
+    button.disabled = active;
+  }
+}
+
 function render() {
   renderSnapshots();
   renderStopBns();
   renderValidation();
+  renderBonusQueue();
+  renderPaymentAudit();
+  renderBotState();
 }
 
 async function refreshState() {
@@ -214,14 +504,46 @@ async function refreshState() {
 }
 
 function createSnapshot(response) {
-  const normalized = normalizeExtractedRows(response.rows);
+  const isScb = response.pageType === "SCB";
+  if (isScb && !(response.source?.columns?.toBank >= 0)) {
+    throw new Error("SCB gagal difilter: kolom To Bank tidak ditemukan pada tabel.");
+  }
+  const sourceRows = response.rows ?? [];
+  const selectedRows = isScb
+    ? sourceRows.filter((row) => isDailyBonusToBank(row.toBank))
+    : sourceRows;
+  const manualDepositSourceRows = isScb
+    ? sourceRows.filter((row) => isManualDepositToBank(row.toBank))
+    : [];
+  const normalized = normalizeExtractedRows(selectedRows);
+  const normalizedManualDeposits = normalizeExtractedRows(manualDepositSourceRows);
+  const scannedEveryPage =
+    response.pagination?.pagesScanned &&
+    response.pagination.pagesScanned === response.pagination.totalPages;
   return {
     rows: normalized.rows,
+    ...(isScb ? {
+      manualDepositRows: normalizedManualDeposits.rows,
+      manualDepositInvalidAmounts: normalizedManualDeposits.invalidAmounts
+    } : {}),
     capturedAt: new Date().toISOString(),
-    rawRowCount: response.sourceRowCount ?? response.rows.length,
+    rawRowCount: isScb
+      ? normalized.rows.length
+      : scannedEveryPage && response.pagination.totalRecords
+      ? response.pagination.totalRecords
+      : response.sourceRowCount ?? response.rows.length,
     invalidAmounts: normalized.invalidAmounts,
     skippedWithoutUsername: response.skippedWithoutUsername ?? 0,
-    source: response.source
+    source: {
+      ...response.source,
+      ...(isScb ? {
+        filter: "To Bank contains SCB A BONUS DEPOSIT HARIAN 01",
+        rowsBeforeFilter: sourceRows.length,
+        filteredOut: sourceRows.length - selectedRows.length,
+        manualDepositRows: normalizedManualDeposits.rows.length,
+        excludedInternalScbRows: sourceRows.length - selectedRows.length - manualDepositSourceRows.length
+      } : {})
+    }
   };
 }
 
@@ -257,7 +579,7 @@ async function findOrOpenPanelTabs() {
   return tabByType;
 }
 
-async function scanPanelTab(tab, expectedType) {
+async function scanPanelTab(tab, expectedType, expectedPage = 1) {
   const deadline = Date.now() + SCAN_TIMEOUT_MS;
   let lastMessage = "Table not ready.";
 
@@ -270,9 +592,12 @@ async function scanPanelTab(tab, expectedType) {
           if (response.pageType !== expectedType) {
             throw new Error(`terdeteksi sebagai ${response.pageType}`);
           }
-          return response;
+          const currentPage = response.pagination?.currentPage ?? 1;
+          if (currentPage === expectedPage) return response;
+          lastMessage = `menunggu page ${expectedPage}, sekarang masih page ${currentPage}`;
+        } else {
+          lastMessage = response?.message || "Scan failed.";
         }
-        lastMessage = response?.message || "Scan failed.";
       } else {
         lastMessage = "halaman masih loading";
       }
@@ -283,6 +608,50 @@ async function scanPanelTab(tab, expectedType) {
   }
 
   throw new Error(`${expectedType} gagal dipindai: ${lastMessage} Pastikan login dan tabel sudah tampil.`);
+}
+
+async function goToNextPanelPage(tabId, pageNumber) {
+  const execution = await chrome.scripting.executeScript({
+    target: { tabId },
+    world: "MAIN",
+    func: (targetPage) => {
+      const nextButton = document.querySelector('button[id$="_btnNext"]');
+      if (nextButton && !nextButton.disabled) {
+        setTimeout(() => nextButton.click(), 30);
+        return { ok: true, method: "next" };
+      }
+
+      const input = document.querySelector('input[id$="_txtPgNum"]');
+      if (!input) return { ok: false, message: "Tombol Next dan input pagination tidak ditemukan." };
+      const buttonId = input.id.replace(/_txtPgNum$/, "_btnPgNum");
+      const button = document.getElementById(buttonId);
+      if (!button) return { ok: false, message: "Tombol submit pagination tidak ditemukan." };
+      input.value = String(targetPage);
+      input.setAttribute("value", String(targetPage));
+      setTimeout(() => button.click(), 30);
+      return { ok: true, method: "page-number" };
+    },
+    args: [pageNumber]
+  });
+  const result = execution[0]?.result;
+  if (!result?.ok) throw new Error(result?.message || `Tidak dapat membuka page ${pageNumber}.`);
+}
+
+async function scanPanelAllPages(tab, expectedType) {
+  const firstPage = await scanPanelTab(tab, expectedType, 1);
+  const totalPages = firstPage.pagination?.totalPages ?? 1;
+  if (totalPages < 1 || totalPages > 100) {
+    throw new Error(`${expectedType}: jumlah page tidak wajar (${totalPages}).`);
+  }
+  if (totalPages === 1) return mergePageResponses([firstPage]);
+
+  const pages = [firstPage];
+  for (let pageNumber = 2; pageNumber <= totalPages; pageNumber += 1) {
+    setNotice(`${expectedType}: memindai page ${pageNumber} dari ${totalPages}…`);
+    await goToNextPanelPage(tab.id, pageNumber);
+    pages.push(await scanPanelTab(tab, expectedType, pageNumber));
+  }
+  return mergePageResponses(pages);
 }
 
 async function scanCurrentPage() {
@@ -300,6 +669,12 @@ async function scanCurrentPage() {
     const warnings = [];
     if (response.empty) warnings.push("No transaction rows found.");
     if (snapshot.invalidAmounts) warnings.push(`${snapshot.invalidAmounts} nominal invalid dilewati.`);
+    if (response.pageType === "SCB" && snapshot.manualDepositRows?.length) {
+      warnings.push(`${snapshot.manualDepositRows.length} deposit manual ikut menjadi sumber DP.`);
+    }
+    if (response.pageType === "SCB" && snapshot.source?.excludedInternalScbRows) {
+      warnings.push(`${snapshot.source.excludedInternalScbRows} row SCB bonus lain diabaikan.`);
+    }
     setNotice(
       `${response.pageType} saved: ${snapshot.rows.length} rows.${warnings.length ? ` ${warnings.join(" ")}` : ""}`,
       "success"
@@ -322,14 +697,19 @@ async function calculateAndSaveValidation() {
     throw new Error(`${missing.map((key) => key.toUpperCase()).join(", ")} snapshot missing.`);
   }
 
+  const combinedDepositRows = [
+    ...state.dp.rows,
+    ...(state.scb.manualDepositRows ?? [])
+  ];
   const validation = validateSnapshots(
-    state.dp.rows,
+    combinedDepositRows,
     state.wd.rows,
     state.scb.rows,
     state.stopBns?.ids ?? []
   );
-  validation.stats.rawDp = state.dp.rawRowCount ?? state.dp.rows.length;
-  validation.stats.invalidAmounts = state.dp.invalidAmounts ?? validation.stats.invalidAmounts;
+  validation.stats.rawDp = (state.dp.rawRowCount ?? state.dp.rows.length) + (state.scb.manualDepositRows?.length ?? 0);
+  validation.stats.invalidAmounts =
+    (state.dp.invalidAmounts ?? 0) + (state.scb.manualDepositInvalidAmounts ?? 0);
   validation.runAt = new Date().toISOString();
   validation.sourceCapturedAt = {
     dp: state.dp.capturedAt,
@@ -337,7 +717,25 @@ async function calculateAndSaveValidation() {
     scb: state.scb.capturedAt
   };
 
-  await saveValidation(validation);
+  const bonusQueue = buildBonusQueue(
+    combinedDepositRows,
+    state.wd.rows,
+    state.scb.rows,
+    state.stopBns?.ids ?? []
+  );
+  bonusQueue.generatedAt = new Date().toISOString();
+  bonusQueue.sourceCapturedAt = { ...validation.sourceCapturedAt };
+
+  const bonusAudit = auditBonusPayments(
+    combinedDepositRows,
+    state.wd.rows,
+    state.scb.rows,
+    state.stopBns?.ids ?? []
+  );
+  bonusAudit.generatedAt = new Date().toISOString();
+  bonusAudit.sourceCapturedAt = { ...validation.sourceCapturedAt };
+
+  await saveDerivedResults(validation, bonusQueue, bonusAudit);
   await refreshState();
   return validation;
 }
@@ -347,7 +745,7 @@ async function runValidation() {
   try {
     const validation = await calculateAndSaveValidation();
     setNotice(
-      `Validation selesai: ${validation.stats.bns} BNS, ${validation.stats.stopBns} Stop BNS, dari ${validation.stats.eligible} transaksi eligible.`,
+      `Validation selesai: ${validation.stats.bns} transaksi BNS · ${state.bonusQueue.stats.ready} ID bonus ready · ${state.bonusAudit.stats.issueRows} salah/double · ${state.bonusAudit.stats.missing} belum dibagi.`,
       "success"
     );
     return validation;
@@ -367,9 +765,12 @@ async function scanAllPages() {
 
   try {
     const tabs = await findOrOpenPanelTabs();
-    setNotice("Menunggu tabel lalu memindai DP, WD, dan SCB sekaligus…");
+    setNotice("Memuat ulang halaman history DP, WD, dan SCB secara aman…");
+    await Promise.all(
+      PANEL_TYPES.map((type) => chrome.tabs.update(tabs[type].id, { url: PANEL_URLS[type] }))
+    );
     const responses = await Promise.all(
-      PANEL_TYPES.map(async (type) => [type, await scanPanelTab(tabs[type], type)])
+      PANEL_TYPES.map(async (type) => [type, await scanPanelAllPages(tabs[type], type)])
     );
 
     for (const [type, response] of responses) {
@@ -378,10 +779,17 @@ async function scanAllPages() {
     await refreshState();
     const validation = await calculateAndSaveValidation();
     const rowSummary = PANEL_TYPES
-      .map((type) => `${type} ${state[type.toLocaleLowerCase("en-US")].rows.length}`)
+      .map((type) => {
+        const snapshot = state[type.toLocaleLowerCase("en-US")];
+        const pageCount = snapshot.source?.pagesScanned ?? 1;
+        const filterInfo = type === "SCB"
+          ? `, ${snapshot.manualDepositRows?.length ?? 0} manual DP${snapshot.source?.excludedInternalScbRows ? `, ${snapshot.source.excludedInternalScbRows} SCB lain diabaikan` : ""}`
+          : "";
+        return `${type} ${snapshot.rows.length}${pageCount > 1 ? ` (${pageCount} pages)` : ""}${filterInfo}`;
+      })
       .join(" · ");
     setNotice(
-      `${rowSummary}. Validation: ${validation.stats.bns} BNS, ${validation.stats.stopBns} Stop BNS.`,
+      `${rowSummary}. ${validation.stats.bns} transaksi BNS · ${state.bonusQueue.stats.ready} ID ready · ${state.bonusAudit.stats.issueRows} salah/double · ${state.bonusAudit.stats.missing} belum dibagi.`,
       "success"
     );
   } catch (error) {
@@ -446,6 +854,46 @@ async function clearStopBnsList() {
   }
 }
 
+async function copyBonusValue(value, successMessage) {
+  if (!value) {
+    setNotice("Tidak ada ID bonus READY untuk dicopy.", "error");
+    return;
+  }
+  try {
+    await navigator.clipboard.writeText(String(value));
+    setNotice(successMessage, "success");
+  } catch (error) {
+    setNotice(error instanceof Error ? error.message : "Copy failed.", "error");
+  }
+}
+
+async function copyNextBonusId() {
+  const next = getSortedReadyBonusRows()[0];
+  await copyBonusValue(next?.username, next ? `ID ${next.username} berhasil dicopy.` : "");
+}
+
+async function copyNextBonusAmount() {
+  const next = getSortedReadyBonusRows()[0];
+  await copyBonusValue(next?.bonusAmount, next ? `Bonus ${numberFormatter.format(next.bonusAmount)} berhasil dicopy.` : "");
+}
+
+async function copyReadyBonusQueue() {
+  const rows = getSortedReadyBonusRows();
+  const text = rows.map((row) => `${row.username}\t${row.bonusAmount}`).join("\n");
+  await copyBonusValue(text, `${rows.length} ID READY berhasil dicopy dalam 2 kolom Sheet.`);
+}
+
+async function copyAuditIssues() {
+  const rows = (state.bonusAudit?.rows ?? []).filter((row) => row.status !== AUDIT_STATUS.CORRECT);
+  const lines = sortTransactions(rows, elements.paymentAuditSort.value).map((row) => {
+    const maximumDp = row.maximumDp === null ? "TANPA DP" : row.maximumDp;
+    const expected = row.expectedBonus === null ? "TIDAK BERHAK" : row.expectedBonus;
+    const findings = row.issues.map(auditIssueLabel).join(", ");
+    return `${row.username}\t${maximumDp}\t${expected}\t${row.actualTotal}\t${row.actualTransactionCount}\t${findings}`;
+  });
+  await copyBonusValue(lines.join("\n"), `${rows.length} temuan Bonus Audit berhasil dicopy ke kolom Sheet.`);
+}
+
 function getBnsResults() {
   return (state.validation?.results ?? []).filter((result) => result.status === STATUS.BNS);
 }
@@ -472,7 +920,7 @@ async function copyBnsUsernames() {
 async function copyBnsDetails() {
   try {
     const lines = sortTransactions(getBnsResults(), elements.resultSort.value).map(
-      (row) => `${row.username} | ${numberFormatter.format(row.amount)} | ${row.datetime}`
+      (row) => `${row.username}\t${row.amount}\t${row.datetime}`
     );
     await copyText(lines.join("\n"));
   } catch (error) {
@@ -502,6 +950,39 @@ async function clearSnapshots() {
   }
 }
 
+async function startBonusBot() {
+  setBusy(elements.botStartButton, true, "STARTING…");
+  try {
+    const response = await chrome.runtime.sendMessage({
+      type: "BNS_BOT_START",
+      sortMode: elements.bonusSort.value
+    });
+    if (!response?.ok) throw new Error(response?.message || "Bot gagal dijalankan.");
+    await refreshState();
+    setNotice("Bot aktif. Form Deposit Manual sedang dibuka.", "success");
+  } catch (error) {
+    setNotice(error instanceof Error ? error.message : "Bot gagal dijalankan.", "error");
+  } finally {
+    setBusy(elements.botStartButton, false);
+    renderBotState();
+  }
+}
+
+async function stopBonusBot() {
+  setBusy(elements.botStopButton, true, "STOPPING…");
+  try {
+    const response = await chrome.runtime.sendMessage({ type: "BNS_BOT_STOP" });
+    if (!response?.ok) throw new Error(response?.message || "Bot gagal dihentikan.");
+    await refreshState();
+    setNotice("Bot dihentikan. Form yang sudah terbuka tidak akan diproses lanjut.", "success");
+  } catch (error) {
+    setNotice(error instanceof Error ? error.message : "Bot gagal dihentikan.", "error");
+  } finally {
+    setBusy(elements.botStopButton, false);
+    renderBotState();
+  }
+}
+
 elements.scanAllButton.addEventListener("click", scanAllPages);
 elements.scanButton.addEventListener("click", scanCurrentPage);
 elements.validateButton.addEventListener("click", runValidation);
@@ -515,5 +996,21 @@ elements.statusFilter.addEventListener("change", renderResults);
 elements.resultSort.addEventListener("change", renderResults);
 elements.usernameSearch.addEventListener("input", renderResults);
 elements.stopBnsInput.addEventListener("input", () => { stopBnsInputDirty = true; });
+elements.bonusFilter.addEventListener("change", renderBonusQueue);
+elements.bonusSort.addEventListener("change", renderBonusQueue);
+elements.copyNextIdButton.addEventListener("click", copyNextBonusId);
+elements.copyNextBonusButton.addEventListener("click", copyNextBonusAmount);
+elements.copyReadyQueueButton.addEventListener("click", copyReadyBonusQueue);
+elements.botStartButton.addEventListener("click", startBonusBot);
+elements.botStopButton.addEventListener("click", stopBonusBot);
+elements.paymentAuditFilter.addEventListener("change", renderPaymentAudit);
+elements.paymentAuditSort.addEventListener("change", renderPaymentAudit);
+elements.copyAuditIssuesButton.addEventListener("click", copyAuditIssues);
+
+chrome.storage.onChanged.addListener((changes, areaName) => {
+  if (areaName === "local" && (changes.botState || changes.bonusQueue || changes.bonusAudit || changes.scb)) {
+    refreshState().catch((error) => setNotice(error.message, "error"));
+  }
+});
 
 refreshState().catch((error) => setNotice(error.message, "error"));

@@ -31,25 +31,25 @@ function removeStorage(keys) {
 }
 
 export async function loadState() {
-  return getStorage([...SNAPSHOT_KEYS, "validation", "stopBns"]);
+  return getStorage([...SNAPSHOT_KEYS, "validation", "bonusQueue", "bonusAudit", "stopBns", "botState"]);
 }
 
 export async function saveSnapshot(pageType, snapshot) {
   const key = String(pageType).toLocaleLowerCase("en-US");
   if (!SNAPSHOT_KEYS.includes(key)) throw new Error("Unsupported snapshot type.");
   await setStorage({ [key]: snapshot });
-  await removeStorage("validation");
+  await removeStorage(["validation", "bonusQueue", "bonusAudit", "botState"]);
 }
 
-export async function saveValidation(validation) {
-  await setStorage({ validation });
+export async function saveDerivedResults(validation, bonusQueue, bonusAudit) {
+  await setStorage({ validation, bonusQueue, bonusAudit });
 }
 
 export async function saveStopBns(stopBns) {
   await setStorage({ stopBns });
-  await removeStorage("validation");
+  await removeStorage(["validation", "bonusQueue", "bonusAudit", "botState"]);
 }
 
 export async function clearAllData() {
-  await removeStorage([...SNAPSHOT_KEYS, "validation"]);
+  await removeStorage([...SNAPSHOT_KEYS, "validation", "bonusQueue", "bonusAudit", "botState"]);
 }

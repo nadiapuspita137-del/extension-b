@@ -12,7 +12,7 @@
         <div class="brand-lockup">
           <img class="brand-icon" src="icons/icon48.png" alt="" width="48" height="48" />
           <div>
-            <p class="eyebrow">LOCAL · READ-ONLY</p>
+            <p class="eyebrow">LOCAL · SEMI-AUTO</p>
             <h1>BNS Validator</h1>
             <p class="subtitle">DP / WD / SCB live snapshot</p>
           </div>
@@ -66,6 +66,27 @@
         </div>
       </section>
 
+      <section class="bot-section" aria-labelledby="bot-heading">
+        <div class="section-heading">
+          <div>
+            <p class="eyebrow">ADMIN TETAP KLIK FINAL SUBMIT</p>
+            <h2 id="bot-heading">Bonus Input Bot</h2>
+          </div>
+          <span id="bot-status-badge" class="bot-status-badge off">OFF</span>
+        </div>
+        <p class="section-copy">Bot membuka ID READY satu per satu, mengisi Amount, memilih SCB A Bonus Deposit Harian 01, dan langsung lanjut setelah admin klik Submit. Validasi akhir dilakukan manual.</p>
+        <div class="bot-current-card">
+          <div><span>ID sekarang</span><strong id="bot-current-id">—</strong></div>
+          <div><span>Bonus</span><strong id="bot-current-amount">—</strong></div>
+          <div><span>Proses selesai</span><strong id="bot-completed-count">0</strong></div>
+        </div>
+        <p id="bot-stage" class="bot-stage">Bot belum dijalankan.</p>
+        <div class="bot-actions">
+          <button id="bot-start-button" class="button bot-on" type="button">BOT ON</button>
+          <button id="bot-stop-button" class="button bot-off" type="button" disabled>STOP BOT</button>
+        </div>
+      </section>
+
       <section class="audit-section" aria-labelledby="audit-heading">
         <div class="section-heading">
           <div>
@@ -87,6 +108,150 @@
           <div class="stat"><span>WD + SCB</span><strong id="stat-both">—</strong></div>
         </div>
         <p id="invalid-summary" class="invalid-summary"></p>
+      </section>
+
+      <section class="bonus-section" aria-labelledby="bonus-heading">
+        <div class="section-heading">
+          <div>
+            <p class="eyebrow">SEMI-AUTO · UNIQUE ID</p>
+            <h2 id="bonus-heading">Bonus Queue</h2>
+          </div>
+          <span id="bonus-generated-time" class="muted">Belum dibuat</span>
+        </div>
+
+        <div class="stats-grid bonus-stats-grid">
+          <div class="stat"><span>Unique DP</span><strong id="bonus-stat-unique">—</strong></div>
+          <div class="stat accent"><span>Max in range</span><strong id="bonus-stat-range">—</strong></div>
+          <div class="stat ready"><span>Ready</span><strong id="bonus-stat-ready">—</strong></div>
+          <div class="stat"><span>In history</span><strong id="bonus-stat-history">—</strong></div>
+          <div class="stat"><span>Found WD</span><strong id="bonus-stat-wd">—</strong></div>
+          <div class="stat"><span>WD + history</span><strong id="bonus-stat-both">—</strong></div>
+          <div class="stat stopped"><span>Stop BNS</span><strong id="bonus-stat-stop">—</strong></div>
+          <div class="stat"><span>Max &lt; 50k</span><strong id="bonus-stat-below">—</strong></div>
+          <div class="stat"><span>Max ≥ 500k</span><strong id="bonus-stat-above">—</strong></div>
+        </div>
+
+        <div class="next-bonus-card">
+          <div>
+            <span class="next-label">NEXT READY ID</span>
+            <strong id="next-bonus-username">—</strong>
+          </div>
+          <div class="next-metric"><span>Max DP</span><strong id="next-bonus-dp">—</strong></div>
+          <div class="next-metric"><span>Bonus</span><strong id="next-bonus-amount">—</strong></div>
+          <button id="copy-next-id-button" class="button secondary small" type="button">Copy ID</button>
+          <button id="copy-next-bonus-button" class="button secondary small" type="button">Copy Bonus</button>
+        </div>
+
+        <div class="bonus-tools">
+          <label>
+            <span>Filter queue</span>
+            <select id="bonus-filter">
+              <option value="READY">Ready</option>
+              <option value="ALL">All unique IDs</option>
+              <option value="ALREADY_IN_HISTORY">Already in history</option>
+              <option value="STOP_BNS">Stop BNS</option>
+              <option value="FOUND_WD">Found WD</option>
+              <option value="OUT_OF_RANGE">Out of range</option>
+            </select>
+          </label>
+          <label>
+            <span>Sort queue</span>
+            <select id="bonus-sort">
+              <option value="DP_DESC">DP terbesar → terkecil</option>
+              <option value="DP_ASC">DP terkecil → terbesar</option>
+              <option value="ID_DESC">ID terbesar → terkecil</option>
+              <option value="ID_ASC">ID terkecil → terbesar</option>
+            </select>
+          </label>
+          <button id="copy-ready-queue-button" class="button ghost small queue-copy-button" type="button">Copy 2 Kolom</button>
+        </div>
+
+        <div class="table-wrap bonus-table-wrap">
+          <table class="bonus-table">
+            <thead>
+              <tr>
+                <th>Username</th>
+                <th>Max DP</th>
+                <th>Bonus</th>
+                <th>Tx</th>
+                <th>Status</th>
+              </tr>
+            </thead>
+            <tbody id="bonus-results-body"></tbody>
+          </table>
+          <p id="empty-bonus-results" class="empty-results">Scan dan jalankan validation untuk membuat antrean.</p>
+        </div>
+      </section>
+
+      <section class="audit-payment-section" aria-labelledby="payment-audit-heading">
+        <div class="section-heading">
+          <div>
+            <p class="eyebrow">EXPECTED DP vs ACTUAL SCB</p>
+            <h2 id="payment-audit-heading">Bonus Audit</h2>
+          </div>
+          <span id="payment-audit-time" class="muted">Belum dibuat</span>
+        </div>
+        <p class="section-copy">Mendeteksi salah nominal, bonus ganda, bonus tanpa hak, dan bonus yang belum dibagikan.</p>
+
+        <div class="stats-grid audit-payment-stats">
+          <div class="stat ready"><span>Benar</span><strong id="audit-stat-correct">—</strong></div>
+          <div class="stat danger"><span>Bermasalah</span><strong id="audit-stat-issues">—</strong></div>
+          <div class="stat stopped"><span>Belum dibagi</span><strong id="audit-stat-missing">—</strong></div>
+          <div class="stat danger"><span>Double</span><strong id="audit-stat-double">—</strong></div>
+          <div class="stat danger"><span>Lebih nominal</span><strong id="audit-stat-over">—</strong></div>
+          <div class="stat stopped"><span>Kurang nominal</span><strong id="audit-stat-under">—</strong></div>
+          <div class="stat"><span>Tanpa DP</span><strong id="audit-stat-no-dp">—</strong></div>
+          <div class="stat"><span>Melanggar rule</span><strong id="audit-stat-rule">—</strong></div>
+        </div>
+
+        <div class="audit-money-grid">
+          <div><span>Seharusnya</span><strong id="audit-expected-total">—</strong></div>
+          <div><span>Aktual SCB</span><strong id="audit-actual-total">—</strong></div>
+          <div><span>Selisih</span><strong id="audit-difference">—</strong></div>
+        </div>
+
+        <div class="bonus-tools audit-tools">
+          <label>
+            <span>Filter audit</span>
+            <select id="payment-audit-filter">
+              <option value="PROBLEM">Semua masalah</option>
+              <option value="ALL">Semua data</option>
+              <option value="CORRECT">Benar</option>
+              <option value="MISSING">Belum dibagi</option>
+              <option value="DOUBLE_BONUS">Double bonus</option>
+              <option value="OVERPAID">Nominal lebih</option>
+              <option value="UNDERPAID">Nominal kurang</option>
+              <option value="INVALID_RULE">Tidak berhak</option>
+            </select>
+          </label>
+          <label>
+            <span>Sort audit</span>
+            <select id="payment-audit-sort">
+              <option value="ID_ASC">ID kecil → besar</option>
+              <option value="ID_DESC">ID besar → kecil</option>
+              <option value="DP_DESC">DP terbesar → terkecil</option>
+              <option value="DP_ASC">DP terkecil → terbesar</option>
+            </select>
+          </label>
+          <button id="copy-audit-issues-button" class="button ghost small queue-copy-button" type="button">Copy Masalah ke Sheet</button>
+        </div>
+
+        <div class="table-wrap payment-audit-table-wrap">
+          <table class="payment-audit-table">
+            <thead>
+              <tr>
+                <th>Username</th>
+                <th>Max DP</th>
+                <th>Seharusnya</th>
+                <th>Aktual</th>
+                <th>Tx</th>
+                <th>Temuan</th>
+              </tr>
+            </thead>
+            <tbody id="payment-audit-body"></tbody>
+          </table>
+          <p id="empty-payment-audit" class="empty-results">Scan dan jalankan validation untuk membuat audit.</p>
+        </div>
       </section>
 
       <section id="results-section" class="results-section" aria-labelledby="results-heading">
@@ -142,12 +307,12 @@
 
         <div class="copy-actions">
           <button id="copy-usernames-button" class="button secondary small" type="button">Copy BNS Usernames</button>
-          <button id="copy-details-button" class="button ghost small" type="button">Copy BNS Full Detail</button>
+          <button id="copy-details-button" class="button ghost small" type="button">Copy Detail 3 Kolom</button>
         </div>
       </section>
 
       <footer>
-        <span>Tanpa backend · Stop BNS tetap tersimpan saat snapshot dibersihkan</span>
+        <span>Tanpa backend · final Submit selalu oleh admin</span>
         <button id="clear-button" class="clear-button" type="button">Clear All Snapshot</button>
       </footer>
     </main>

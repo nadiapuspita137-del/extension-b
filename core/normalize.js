@@ -4,6 +4,24 @@ export function normalizeUsername(value) {
     .toLocaleLowerCase("id-ID");
 }
 
+function normalizeBankText(value) {
+  return String(value ?? "")
+    .replace(/\u00a0/g, " ")
+    .replace(/\s+/g, " ")
+    .trim()
+    .toLocaleLowerCase("en-US");
+}
+
+export function isDailyBonusToBank(value) {
+  const text = normalizeBankText(value);
+  return /\bscb a bonus deposit harian(?:\s+01)?\b/.test(text);
+}
+
+export function isManualDepositToBank(value) {
+  const text = normalizeBankText(value);
+  return Boolean(text) && !/^scb(?:\s|\-|$)/.test(text);
+}
+
 /**
  * Parse an amount without guessing a fixed locale.
  * Repeated groups of three digits are treated as thousand separators, while
@@ -83,7 +101,11 @@ export function normalizeExtractedRows(rawRows) {
       username,
       usernameKey,
       amount,
-      datetime: String(rawRow.datetime ?? "").trim()
+      datetime: String(rawRow.datetime ?? "").trim(),
+      reference: String(rawRow.reference ?? "").trim(),
+      rrn: String(rawRow.rrn ?? "").trim(),
+      toBank: String(rawRow.toBank ?? "").trim(),
+      rowNumber: String(rawRow.rowNumber ?? "").trim()
     });
   }
 

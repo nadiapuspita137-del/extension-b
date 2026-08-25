@@ -41,12 +41,33 @@
     );
   };
 
+  const isReferenceHeader = (value) => {
+    const text = normalizeText(value);
+    return text === "reference" || text.startsWith("reference ");
+  };
+
+  const isRrnHeader = (value) => {
+    const text = normalizeText(value);
+    return text === "rrn" || text.startsWith("rrn ");
+  };
+
+  const isToBankHeader = (value) => {
+    const text = normalizeText(value);
+    return text === "to bank" || text === "to bank name" || text.startsWith("to bank ");
+  };
+
   function describeHeaderRow(row, rowIndex) {
     const headers = Array.from(row.cells ?? []).map(cellText);
     const usernameIndex = headers.findIndex(isUsernameHeader);
     const depositIndex = headers.findIndex(isDepositHeader);
     const withdrawIndex = headers.findIndex(isWithdrawHeader);
     const datetimeIndex = headers.findIndex(isDatetimeHeader);
+    const referenceIndex = headers.findIndex(isReferenceHeader);
+    const rrnIndex = headers.findIndex(isRrnHeader);
+    const toBankIndex = headers.findIndex(isToBankHeader);
+    const rowNumberIndex = headers.findIndex(
+      (value, index) => index < usernameIndex && normalizeText(value) === ""
+    );
     const amountIndex = withdrawIndex >= 0 ? withdrawIndex : depositIndex;
 
     return {
@@ -56,6 +77,10 @@
       depositIndex,
       withdrawIndex,
       datetimeIndex,
+      referenceIndex,
+      rrnIndex,
+      toBankIndex,
+      rowNumberIndex,
       amountIndex,
       valid: usernameIndex >= 0 && amountIndex >= 0
     };
@@ -117,6 +142,7 @@
 
       const username = cellText(cells[header.usernameIndex]);
       if (isUsernameHeader(username)) continue;
+      if (!username && row.querySelector?.('[id$="_lblTotalAmount"]')) continue;
       sourceRowCount += 1;
       if (!username || isUsernameHeader(username)) {
         skippedWithoutUsername += 1;
@@ -126,11 +152,38 @@
       extracted.push({
         username,
         amountText: cellText(cells[header.amountIndex]),
-        datetime: header.datetimeIndex >= 0 ? cellText(cells[header.datetimeIndex]) : ""
+        datetime: header.datetimeIndex >= 0 ? cellText(cells[header.datetimeIndex]) : "",
+        reference: header.referenceIndex >= 0 ? cellText(cells[header.referenceIndex]) : "",
+        rrn: header.rrnIndex >= 0 ? cellText(cells[header.rrnIndex]) : "",
+        toBank: header.toBankIndex >= 0 ? cellText(cells[header.toBankIndex]) : "",
+        rowNumber: header.rowNumberIndex >= 0 ? cellText(cells[header.rowNumberIndex]) : ""
       });
     }
 
     return { rows: extracted, skippedWithoutUsername, sourceRowCount };
+  }
+
+  function readPagination() {
+    const pageInput = document.querySelector?.('input[id$="_txtPgNum"]') ?? null;
+    const pageText = String(pageInput?.parentElement?.innerText ?? pageInput?.parentElement?.textContent ?? "");
+    const currentPage = Number.parseInt(String(pageInput?.value ?? "1").replace(/\D/g, ""), 10) || 1;
+    const totalPageMatch = pageText.match(/\bof\s*([\d.,]+)/i);
+    const totalPages = totalPageMatch
+      ? Number.parseInt(totalPageMatch[1].replace(/\D/g, ""), 10) || 1
+      : 1;
+    const bodyText = String(document.body?.innerText ?? document.body?.textContent ?? "");
+    const totalRecordMatch = bodyText.match(/Total\s*Records\s*:\s*([\d.,]+)/i);
+    const totalRecords = totalRecordMatch
+      ? Number.parseInt(totalRecordMatch[1].replace(/\D/g, ""), 10) || null
+      : null;
+
+    return {
+      available: Boolean(pageInput),
+      inputId: pageInput?.id ?? "",
+      currentPage,
+      totalPages,
+      totalRecords
+    };
   }
 
   function scanCurrentPage() {
@@ -153,6 +206,7 @@
       message: extracted.rows.length === 0 ? "No transaction rows found." : "",
       skippedWithoutUsername: extracted.skippedWithoutUsername,
       sourceRowCount: extracted.sourceRowCount,
+      pagination: readPagination(),
       source: {
         pageUrl: location.href,
         tableId: tableInfo.table.id || "(no id)",
@@ -160,7 +214,10 @@
         columns: {
           username: tableInfo.header.usernameIndex,
           amount: tableInfo.header.amountIndex,
-          datetime: tableInfo.header.datetimeIndex
+          datetime: tableInfo.header.datetimeIndex,
+          reference: tableInfo.header.referenceIndex,
+          rrn: tableInfo.header.rrnIndex,
+          toBank: tableInfo.header.toBankIndex
         }
       }
     };

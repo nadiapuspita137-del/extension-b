@@ -1,8 +1,8 @@
 # DP / WD / SCB Live Validator
 
-Chrome Extension Manifest V3 untuk mengambil snapshot tabel DP, WD, dan SCB dari halaman panel yang sedang aktif, lalu memvalidasi kandidat BNS sepenuhnya di browser.
+Chrome Extension Manifest V3 untuk mengambil snapshot tabel DP, WD, dan SCB, memvalidasi kandidat BNS, lalu membantu pengisian bonus secara semi-auto di browser.
 
-Extension ini bersifat **read-only**. Tidak ada backend, request API, analytics, telemetry, pembacaan cookie/token, perubahan transaksi, atau auto-click.
+Tidak ada backend, analytics, telemetry, atau pembacaan cookie/token. Scanner history bersifat read-only. Mode bot hanya menyiapkan form Deposit Manual; final Submit transaksi selalu memerlukan klik admin.
 
 ## Cara memasang
 
@@ -23,6 +23,7 @@ Tidak ada dependency atau build step untuk menjalankan extension.
 5. Gunakan sort/filter, **View BNS**, **Copy BNS Usernames**, atau **Copy BNS Full Detail**.
 6. **Scan Active Page** dan **Run Validation** tetap tersedia sebagai fallback manual.
 7. Gunakan **Clear All Snapshot** untuk menghapus snapshot tanpa menghapus daftar Stop BNS.
+8. Untuk pembagian, pilih urutan Bonus Queue lalu klik **BOT ON**. Periksa form yang disorot dan klik final **Submit**.
 
 URL panel yang digunakan oleh mode satu klik:
 
@@ -32,7 +33,7 @@ SCB https://bfj.porta-assist.com/_SubAg_Sub/AddCreditHistory2.aspx
 DP  https://bfj.porta-assist.com/_SubAg_Sub/AddCreditHistory2.aspx?IsABD=1
 ```
 
-Host permission dibatasi ke `https://bfj.porta-assist.com/_SubAg_Sub/*`. Mode satu klik hanya membuka/membaca halaman history tersebut; tidak menekan tombol transaksi atau mengubah data panel.
+Host permission dibatasi ke `https://bfj.porta-assist.com/_SubAg_Sub/*`. Scanner satu klik hanya membuka/membaca halaman history. Mode bot bekerja khusus pada `AddCreditRequest2.aspx` dan tidak pernah menekan final Submit sendiri.
 
 Snapshot kosong yang berhasil diambil disimpan sebagai `0 rows` dan berbeda dari snapshot yang belum pernah diambil. Popup tetap menampilkan pesan `No transaction rows found.`; validation hanya dapat berjalan setelah ketiga jenis snapshot tersedia.
 
@@ -99,6 +100,92 @@ FOUND_WD / FOUND_SCB / FOUND_WD_AND_SCB
 
 Daftar SB tidak ikut terhapus oleh **Clear All Snapshot**. Gunakan **Clear List** pada bagian Stop BNS untuk mengosongkannya.
 
+## Bonus Queue semi-auto
+
+Transaction View tetap mempertahankan audit per transaksi. Bonus Queue adalah lapisan terpisah yang membuat satu pekerjaan pembagian per username untuk laporan hari ini:
+
+```text
+seluruh DP hari ini
+→ kelompokkan berdasarkan username
+→ ambil transaksi DP terbesar setiap username
+→ wajib 50.000 <= DP terbesar < 500.000
+→ cek WD, SCB/history hari ini, dan Stop BNS
+→ hitung 10%
+→ bulatkan ke bawah ke kelipatan 1.000
+→ READY
+```
+
+Contoh:
+
+```text
+userA  50.000
+userA 300.000
+
+DP terbesar 300.000 → bonus 30.000 → satu pekerjaan READY
+```
+
+Jika DP terbesar berada di luar range, seluruh ID tidak masuk antrean meskipun mempunyai transaksi lain yang berada di dalam range:
+
+```text
+userA  75.000
+userA 600.000
+
+DP terbesar 600.000 → MAX >= 500K → tidak mendapat bonus
+```
+
+Rumus bonus:
+
+```js
+Math.floor((maximumDp * 0.10) / 1000) * 1000
+```
+
+Bonus Queue menyediakan filter audit, sorting ID/DP, **Copy ID**, **Copy Bonus**, dan **Copy 2 Kolom**. Urutan yang dipilih juga digunakan saat **BOT ON** dijalankan.
+
+## Bonus Input Bot
+
+Bot bersifat semi-auto:
+
+```text
+ambil ID READY sesuai urutan queue
+→ buka AddCreditRequest2.aspx untuk username tersebut
+→ pastikan username form cocok
+→ isi Amount sesuai bonus
+→ pilih SCB|41466 (SCB A BONUS DEPOSIT HARIAN 01)
+→ kosongkan Remark
+→ admin memeriksa dan klik final Submit
+→ catat ID sebagai sudah diproses pada sesi bot
+→ langsung buka ID READY berikutnya
+```
+
+Bot tidak mencari atau mengklik final Submit secara otomatis. Ia hanya memasang validasi pada tombol Submit yang berada setelah field Amount. Jika username, amount, To Bank, atau remark berubah, klik diblokir. Bot tidak lagi menunggu verifikasi SCB; admin menjalankan **Scan All + Validate** secara manual setelah pembagian selesai.
+
+Snapshot dari panel SCB dipisah menjadi dua dataset berdasarkan kolom **To Bank**:
+
+- `SCB A BONUS DEPOSIT HARIAN 01` menjadi riwayat/pembayaran bonus aktual;
+- To Bank non-SCB menjadi **DP manual** dan digabung dengan DP QRIS dari halaman `IsABD=1` sebagai dasar perhitungan bonus;
+- rekening SCB bonus lain tidak dianggap sebagai DP dan tidak dianggap sebagai bonus harian.
+
+Dengan demikian DP terbesar per username dicari dari gabungan **DP QRIS + DP manual**. Jika kolom To Bank tidak ditemukan, scan SCB dihentikan agar tidak menghasilkan validasi yang salah.
+
+## Bonus Audit
+
+Setiap **Scan All + Validate** membandingkan bonus yang seharusnya dengan pembayaran aktual pada SCB bonus harian. Audit bekerja per username per laporan hari ini dan dapat memberi lebih dari satu temuan pada ID yang sama:
+
+- `DOUBLE`: terdapat lebih dari satu transaksi bonus harian;
+- `NOMINAL LEBIH` / `NOMINAL KURANG`: total aktual tidak sama dengan 10% dari DP terbesar yang dibulatkan ke bawah ribuan;
+- `TANPA DP`: ada bonus aktual tetapi username tidak ditemukan pada DP;
+- `MAX < 50K` / `MAX >= 500K`: bonus dibayar untuk DP di luar range;
+- `ADA WD`: bonus dibayar meskipun username ditemukan di WD;
+- `STOP BNS`: bonus dibayar kepada ID pengecualian;
+- `BELUM DIBAGI`: username memenuhi rule tetapi belum ditemukan pada SCB bonus harian;
+- `BENAR`: tepat satu transaksi dan nominalnya sesuai.
+
+Ringkasan menampilkan total seharusnya, aktual SCB, selisih, dan jumlah setiap jenis masalah. Tabel dapat difilter/disort serta disalin dengan **Copy Masalah** untuk pemeriksaan admin.
+
+Semua aksi copy yang berisi lebih dari satu informasi menggunakan format TSV (pemisah TAB). Contoh `username` dan `bonus` akan langsung masuk ke dua cell berbeda ketika ditempel ke Google Sheets atau Excel. Nominal dicopy sebagai integer tanpa pemisah ribuan agar dikenali sebagai angka.
+
+Saat bot aktif, aksi yang dapat membuat snapshot/queue berubah dinonaktifkan. Tombol **STOP BOT** dapat digunakan kapan saja; form yang sudah terbuka tidak akan diteruskan oleh extension.
+
 ## Sorting dan copy
 
 Transaction view menyediakan urutan asli, ID terbesar/terkecil dengan natural numeric sort, dan nominal DP terbesar/terkecil. Pilihan sorting juga dipakai oleh hasil copy BNS.
@@ -109,14 +196,14 @@ Copy username menghasilkan daftar username BNS unik; `STOP_BNS` tidak ikut dicop
 
 Pada setiap halaman panel:
 
-1. pastikan tabel sudah selesai tampil (termasuk filter/page size yang diinginkan);
+1. pastikan session panel masih login dan laporan hari ini dapat dibuka;
 2. klik **Scan Current Page**;
 3. pastikan tipe halaman dan jumlah row pada pesan sukses sesuai;
 4. cek timestamp card untuk memastikan ketiga snapshot masih baru;
 5. jalankan validation dan audit total `DP raw`, `Eligible`, `< 50k`, `>= 500k`, serta nominal invalid;
 6. bandingkan beberapa row boundary (49.999, 50.000, 499.999, 500.000) secara manual.
 
-Extension hanya membaca row yang saat itu ada di DOM. Jika panel memakai pagination server-side, tampilkan page size yang mencakup data yang hendak divalidasi sebelum scan. Sample HTML lengkap tidak disertakan pada brief, jadi bila struktur panel asli memiliki label header berbeda, tambahkan alias di `content/scanner.js` berdasarkan HTML aktual.
+**Scan All + Validate** mendeteksi pager ASP.NET `Page x of y`, memindai page 1, berpindah melalui kontrol page resmi, menunggu setiap postback selesai, lalu menggabungkan seluruh page. `RRN`, `Reference`, atau nomor row digunakan sebagai transaction identity agar row tidak terduplikasi. Pesan sukses menampilkan jumlah page, misalnya `DP 1009 (2 pages)`. Tombol **Scan Active Page** tetap hanya memindai page yang sedang terlihat dan disediakan sebagai alat diagnosis/fallback.
 
 ## Automated tests
 
@@ -126,7 +213,7 @@ Node.js diperlukan hanya untuk development test:
 npm test
 ```
 
-Test mencakup normalisasi nominal, seluruh sembilan case dari brief, transaksi duplikat, status gabungan WD+SCB, serta deteksi/extraction DP, WD, dan SCB dengan posisi kolom yang berbeda-beda.
+Test mencakup normalisasi nominal, seluruh sembilan case dari brief, transaksi duplikat, status gabungan WD+SCB, deteksi/extraction DP/WD/SCB, unique-ID bonus queue, DP terbesar, pembulatan bonus ke bawah, dan pengecualian history/WD/SB.
 
 ## Struktur file
 
@@ -135,12 +222,17 @@ manifest.json          Manifest V3 dan permission minimal
 icons/                 Logo master dan icon Chrome 16/32/48/128 px
 popup.html             Dashboard dan transaction view
 popup.css              Tampilan popup
-popup.js               One-click scan, render, filter, Stop BNS, copy, clear
+popup.js               One-click scan, queue, kontrol bot, Stop BNS, copy
+bot/background.js      Controller antrean sesi dan perpindahan ID setelah Submit
+bot/deposit-assistant.js  Prefill form dan guard final Submit
 content/scanner.js     Table finder, page detector, header-driven extractor
 core/normalize.js      Normalisasi username dan nominal
 core/validator.js      Rule eligibility dan presence validation
+core/bonus.js          Unique-ID queue, maximum DP, dan bonus calculation
+core/audit.js          Audit expected-vs-actual, double, nominal, dan rule
 core/sort.js           Natural ID sort dan nominal DP sort
 core/panels.js         URL dan mapping tab untuk mode satu klik
+core/pagination.js     Penggabungan multi-page dengan identitas RRN/Reference
 core/storage.js        Wrapper chrome.storage.local
 tests/                 Test normalization, validator, dan scanner
 ```

@@ -1,8 +1,8 @@
 {
   "manifest_version": 3,
   "name": "DP / WD / SCB Live Validator",
-  "version": "1.0.0",
-  "description": "Memindai tabel DP, WD, dan SCB yang sedang dibuka lalu memvalidasi kandidat BNS secara lokal.",
+  "version": "1.3.0",
+  "description": "Memindai DP/WD/SCB, memvalidasi kandidat BNS, dan membantu input bonus secara semi-auto.",
   "icons": {
     "16": "icons/icon16.png",
     "32": "icons/icon32.png",
@@ -18,6 +18,21 @@
   ],
   "host_permissions": [
     "https://bfj.porta-assist.com/_SubAg_Sub/*"
+  ],
+  "background": {
+    "service_worker": "bot/background.js",
+    "type": "module"
+  },
+  "content_scripts": [
+    {
+      "matches": [
+        "https://bfj.porta-assist.com/_SubAg_Sub/AddCreditRequest2.aspx*"
+      ],
+      "js": [
+        "bot/deposit-assistant.js"
+      ],
+      "run_at": "document_idle"
+    }
   ],
   "action": {
     "default_title": "BNS Validator",
