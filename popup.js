@@ -1,15 +1,14 @@
-import {
-  isDailyBonusToBank,
-  isManualDepositToBank,
-  normalizeExtractedRows,
-  normalizeUsername
-} from "./core/normalize.js";
-import { STATUS, validateSnapshots } from "./core/validator.js";
+import { normalizeUsername } from "./core/normalize.js";
+import { STATUS } from "./core/validator.js";
 import { sortTransactions } from "./core/sort.js";
-import { configuredPageType, PANEL_TAB_PATTERN, PANEL_TYPES, PANEL_URLS } from "./core/panels.js";
-import { BONUS_STATUS, buildBonusQueue } from "./core/bonus.js";
-import { AUDIT_ISSUE, AUDIT_STATUS, auditBonusPayments } from "./core/audit.js";
-import { mergePageResponses } from "./core/pagination.js";
+import { PANEL_TYPES } from "./core/panels.js";
+import { BONUS_STATUS } from "./core/bonus.js";
+import { AUDIT_ISSUE, AUDIT_RULES_VERSION, AUDIT_STATUS } from "./core/audit.js";
+import { buildDerivedResults, createSnapshot } from "./core/pipeline.js";
+import {
+  getActiveTab,
+  requestPageScan
+} from "./core/panel-scan.js";
 import {
   clearAllData,
   loadState,
@@ -18,11 +17,12 @@ import {
   saveStopBns
 } from "./core/storage.js";
 
-const SCAN_TIMEOUT_MS = 25_000;
-const RETRY_INTERVAL_MS = 700;
-
 const elements = {
   notice: document.querySelector("#notice"),
+  autoRefreshEnabled: document.querySelector("#auto-refresh-enabled"),
+  autoRefreshInterval: document.querySelector("#auto-refresh-interval"),
+  autoRefreshStatus: document.querySelector("#auto-refresh-status"),
+  saveAutoRefreshButton: document.querySelector("#save-auto-refresh-button"),
   scanAllButton: document.querySelector("#scan-all-button"),
   scanButton: document.querySelector("#scan-button"),
   validateButton: document.querySelector("#validate-button"),
@@ -111,10 +111,8 @@ const auditStatElements = {
 const numberFormatter = new Intl.NumberFormat("id-ID", { maximumFractionDigits: 2 });
 let state = {};
 let stopBnsInputDirty = false;
-
-function delay(milliseconds) {
-  return new Promise((resolve) => setTimeout(resolve, milliseconds));
-}
+let autoRefreshInputDirty = false;
+let auditRulesMigrationRunning = false;
 
 function setNotice(message, kind = "neutral") {
   elements.notice.textContent = message;
@@ -174,6 +172,47 @@ function renderStopBns() {
   if (!stopBnsInputDirty) {
     elements.stopBnsInput.value = ids.map((item) => item.username).join("\n");
   }
+}
+
+function renderAutoRefresh() {
+  const settings = state.autoRefreshSettings ?? { enabled: false, intervalMinutes: 15 };
+  const refresh = state.autoRefreshState ?? {};
+  if (!autoRefreshInputDirty) {
+    elements.autoRefreshEnabled.checked = Boolean(settings.enabled);
+    elements.autoRefreshInterval.value = String(settings.intervalMinutes ?? 15);
+  }
+
+  let message = settings.enabled
+    ? `Aktif setiap ${settings.intervalMinutes} menit.`
+    : "Auto Refresh belum diaktifkan.";
+  if (settings.enabled && refresh.nextRunAt) {
+    message += ` Berikutnya sekitar ${formatTimestamp(refresh.nextRunAt)}.`;
+  }
+  let kind = "";
+
+  if (refresh.running) {
+    message = refresh.progress || "Auto Refresh sedang memindai history…";
+    kind = "running";
+  } else if (refresh.status === "DEFERRED_BOT") {
+    message = "Refresh ditunda karena Bonus Input Bot sedang aktif. Akan dicoba lagi setelah bot berhenti.";
+    kind = "deferred";
+  } else if (refresh.status === "ERROR") {
+    message = `Refresh gagal: ${refresh.lastError || "Unknown error."}`;
+    kind = "error";
+  } else if (refresh.status === "INTERRUPTED") {
+    message = refresh.lastError || "Scan sebelumnya terputus dan sudah dipulihkan. Silakan mulai Scan All lagi.";
+    kind = "error";
+  } else if (refresh.lastSuccessAt) {
+    message = `Terakhir berhasil ${formatTimestamp(refresh.lastSuccessAt)}`;
+    if (settings.enabled && refresh.nextRunAt) {
+      message += ` · berikutnya sekitar ${formatTimestamp(refresh.nextRunAt)}`;
+    }
+    kind = "success";
+  }
+
+  elements.autoRefreshStatus.textContent = message;
+  elements.autoRefreshStatus.className = `auto-refresh-status ${kind}`.trim();
+  elements.saveAutoRefreshButton.disabled = Boolean(refresh.running);
 }
 
 function statusLabel(status) {
@@ -465,6 +504,7 @@ function botStageLabel(botState) {
 function renderBotState() {
   const bot = state.botState;
   const active = Boolean(bot?.active);
+  const refreshRunning = Boolean(state.autoRefreshState?.running);
   const hasError = Boolean(bot?.error) || ["FORM_ERROR", "VERIFY_FAILED"].includes(bot?.stage);
   elements.botStatusBadge.textContent = active ? "ON" : hasError ? "ERROR" : "OFF";
   elements.botStatusBadge.className = `bot-status-badge ${active ? "on" : hasError ? "error" : "off"}`;
@@ -474,7 +514,7 @@ function renderBotState() {
     : "—";
   elements.botCompletedCount.textContent = numberFormatter.format(bot?.completedCount ?? 0);
   elements.botStage.textContent = bot?.error || botStageLabel(bot);
-  elements.botStartButton.disabled = active || !state.bonusQueue?.stats?.ready;
+  elements.botStartButton.disabled = active || refreshRunning || !state.bonusQueue?.stats?.ready;
   elements.botStopButton.disabled = !active;
 
   for (const button of [
@@ -485,13 +525,14 @@ function renderBotState() {
     elements.clearStopBnsButton,
     elements.clearButton
   ]) {
-    button.disabled = active;
+    button.disabled = active || refreshRunning;
   }
 }
 
 function render() {
   renderSnapshots();
   renderStopBns();
+  renderAutoRefresh();
   renderValidation();
   renderBonusQueue();
   renderPaymentAudit();
@@ -500,165 +541,67 @@ function render() {
 
 async function refreshState() {
   state = await loadState();
+  if (
+    !auditRulesMigrationRunning &&
+    state.bonusAudit &&
+    state.bonusAudit.rulesVersion !== AUDIT_RULES_VERSION &&
+    state.dp &&
+    state.wd &&
+    state.scb
+  ) {
+    auditRulesMigrationRunning = true;
+    try {
+      const derived = buildDerivedResults(state);
+      await saveDerivedResults(derived.validation, derived.bonusQueue, derived.bonusAudit);
+      state = { ...state, ...derived };
+    } finally {
+      auditRulesMigrationRunning = false;
+    }
+  }
   render();
 }
 
-function createSnapshot(response) {
-  const isScb = response.pageType === "SCB";
-  if (isScb && !(response.source?.columns?.toBank >= 0)) {
-    throw new Error("SCB gagal difilter: kolom To Bank tidak ditemukan pada tabel.");
-  }
-  const sourceRows = response.rows ?? [];
-  const selectedRows = isScb
-    ? sourceRows.filter((row) => isDailyBonusToBank(row.toBank))
-    : sourceRows;
-  const manualDepositSourceRows = isScb
-    ? sourceRows.filter((row) => isManualDepositToBank(row.toBank))
-    : [];
-  const normalized = normalizeExtractedRows(selectedRows);
-  const normalizedManualDeposits = normalizeExtractedRows(manualDepositSourceRows);
-  const scannedEveryPage =
-    response.pagination?.pagesScanned &&
-    response.pagination.pagesScanned === response.pagination.totalPages;
-  return {
-    rows: normalized.rows,
-    ...(isScb ? {
-      manualDepositRows: normalizedManualDeposits.rows,
-      manualDepositInvalidAmounts: normalizedManualDeposits.invalidAmounts
-    } : {}),
-    capturedAt: new Date().toISOString(),
-    rawRowCount: isScb
-      ? normalized.rows.length
-      : scannedEveryPage && response.pagination.totalRecords
-      ? response.pagination.totalRecords
-      : response.sourceRowCount ?? response.rows.length,
-    invalidAmounts: normalized.invalidAmounts,
-    skippedWithoutUsername: response.skippedWithoutUsername ?? 0,
-    source: {
-      ...response.source,
-      ...(isScb ? {
-        filter: "To Bank contains SCB A BONUS DEPOSIT HARIAN 01",
-        rowsBeforeFilter: sourceRows.length,
-        filteredOut: sourceRows.length - selectedRows.length,
-        manualDepositRows: normalizedManualDeposits.rows.length,
-        excludedInternalScbRows: sourceRows.length - selectedRows.length - manualDepositSourceRows.length
-      } : {})
-    }
-  };
+async function beginManualRefresh() {
+  const response = await chrome.runtime.sendMessage({ type: "BNS_REFRESH_LOCK_BEGIN" });
+  if (!response?.ok) throw new Error(response?.message || "Refresh tidak dapat dimulai.");
 }
 
-async function getActiveTab() {
-  const tabs = await chrome.tabs.query({ active: true, currentWindow: true });
-  const tab = tabs[0];
-  if (!tab?.id) throw new Error("Active tab not found.");
-  return tab;
+async function endManualRefresh() {
+  await chrome.runtime.sendMessage({ type: "BNS_REFRESH_LOCK_END" });
 }
 
-async function requestPageScan(tabId) {
-  await chrome.scripting.executeScript({
-    target: { tabId },
-    files: ["content/scanner.js"]
-  });
-  return chrome.tabs.sendMessage(tabId, { type: "BNS_SCAN_CURRENT_PAGE" });
-}
-
-async function findOrOpenPanelTabs() {
-  const openTabs = await chrome.tabs.query({ url: PANEL_TAB_PATTERN });
-  const tabByType = {};
-
-  for (const tab of openTabs) {
-    const type = configuredPageType(tab.url);
-    if (type && !tabByType[type]) tabByType[type] = tab;
+async function saveAutoRefreshSettings() {
+  setBusy(elements.saveAutoRefreshButton, true, "Saving…");
+  try {
+    const response = await chrome.runtime.sendMessage({
+      type: "BNS_AUTO_REFRESH_CONFIGURE",
+      enabled: elements.autoRefreshEnabled.checked,
+      intervalMinutes: Number(elements.autoRefreshInterval.value)
+    });
+    if (!response?.ok) throw new Error(response?.message || "Pengaturan Auto Refresh gagal disimpan.");
+    autoRefreshInputDirty = false;
+    await refreshState();
+    setNotice(
+      response.settings.enabled
+        ? `Auto Refresh aktif setiap ${response.settings.intervalMinutes} menit.`
+        : "Auto Refresh dinonaktifkan.",
+      "success"
+    );
+  } catch (error) {
+    setNotice(error instanceof Error ? error.message : "Pengaturan Auto Refresh gagal disimpan.", "error");
+  } finally {
+    setBusy(elements.saveAutoRefreshButton, false);
   }
-
-  for (const type of PANEL_TYPES) {
-    if (!tabByType[type]) {
-      tabByType[type] = await chrome.tabs.create({ url: PANEL_URLS[type], active: false });
-    }
-  }
-  return tabByType;
-}
-
-async function scanPanelTab(tab, expectedType, expectedPage = 1) {
-  const deadline = Date.now() + SCAN_TIMEOUT_MS;
-  let lastMessage = "Table not ready.";
-
-  while (Date.now() < deadline) {
-    try {
-      const currentTab = await chrome.tabs.get(tab.id);
-      if (currentTab.status === "complete") {
-        const response = await requestPageScan(tab.id);
-        if (response?.ok) {
-          if (response.pageType !== expectedType) {
-            throw new Error(`terdeteksi sebagai ${response.pageType}`);
-          }
-          const currentPage = response.pagination?.currentPage ?? 1;
-          if (currentPage === expectedPage) return response;
-          lastMessage = `menunggu page ${expectedPage}, sekarang masih page ${currentPage}`;
-        } else {
-          lastMessage = response?.message || "Scan failed.";
-        }
-      } else {
-        lastMessage = "halaman masih loading";
-      }
-    } catch (error) {
-      lastMessage = error instanceof Error ? error.message : "Scan failed.";
-    }
-    await delay(RETRY_INTERVAL_MS);
-  }
-
-  throw new Error(`${expectedType} gagal dipindai: ${lastMessage} Pastikan login dan tabel sudah tampil.`);
-}
-
-async function goToNextPanelPage(tabId, pageNumber) {
-  const execution = await chrome.scripting.executeScript({
-    target: { tabId },
-    world: "MAIN",
-    func: (targetPage) => {
-      const nextButton = document.querySelector('button[id$="_btnNext"]');
-      if (nextButton && !nextButton.disabled) {
-        setTimeout(() => nextButton.click(), 30);
-        return { ok: true, method: "next" };
-      }
-
-      const input = document.querySelector('input[id$="_txtPgNum"]');
-      if (!input) return { ok: false, message: "Tombol Next dan input pagination tidak ditemukan." };
-      const buttonId = input.id.replace(/_txtPgNum$/, "_btnPgNum");
-      const button = document.getElementById(buttonId);
-      if (!button) return { ok: false, message: "Tombol submit pagination tidak ditemukan." };
-      input.value = String(targetPage);
-      input.setAttribute("value", String(targetPage));
-      setTimeout(() => button.click(), 30);
-      return { ok: true, method: "page-number" };
-    },
-    args: [pageNumber]
-  });
-  const result = execution[0]?.result;
-  if (!result?.ok) throw new Error(result?.message || `Tidak dapat membuka page ${pageNumber}.`);
-}
-
-async function scanPanelAllPages(tab, expectedType) {
-  const firstPage = await scanPanelTab(tab, expectedType, 1);
-  const totalPages = firstPage.pagination?.totalPages ?? 1;
-  if (totalPages < 1 || totalPages > 100) {
-    throw new Error(`${expectedType}: jumlah page tidak wajar (${totalPages}).`);
-  }
-  if (totalPages === 1) return mergePageResponses([firstPage]);
-
-  const pages = [firstPage];
-  for (let pageNumber = 2; pageNumber <= totalPages; pageNumber += 1) {
-    setNotice(`${expectedType}: memindai page ${pageNumber} dari ${totalPages}…`);
-    await goToNextPanelPage(tab.id, pageNumber);
-    pages.push(await scanPanelTab(tab, expectedType, pageNumber));
-  }
-  return mergePageResponses(pages);
 }
 
 async function scanCurrentPage() {
   setBusy(elements.scanButton, true, "Scanning…");
   setNotice("Membaca tabel pada halaman aktif…");
+  let refreshLocked = false;
 
   try {
+    await beginManualRefresh();
+    refreshLocked = true;
     const tab = await getActiveTab();
     const response = await requestPageScan(tab.id);
     if (!response?.ok) throw new Error(response?.message || "Scan failed.");
@@ -687,54 +630,13 @@ async function scanCurrentPage() {
       "error"
     );
   } finally {
+    if (refreshLocked) await endManualRefresh().catch(() => {});
     setBusy(elements.scanButton, false);
   }
 }
 
 async function calculateAndSaveValidation() {
-  const missing = ["dp", "wd", "scb"].filter((key) => !state[key]);
-  if (missing.length) {
-    throw new Error(`${missing.map((key) => key.toUpperCase()).join(", ")} snapshot missing.`);
-  }
-
-  const combinedDepositRows = [
-    ...state.dp.rows,
-    ...(state.scb.manualDepositRows ?? [])
-  ];
-  const validation = validateSnapshots(
-    combinedDepositRows,
-    state.wd.rows,
-    state.scb.rows,
-    state.stopBns?.ids ?? []
-  );
-  validation.stats.rawDp = (state.dp.rawRowCount ?? state.dp.rows.length) + (state.scb.manualDepositRows?.length ?? 0);
-  validation.stats.invalidAmounts =
-    (state.dp.invalidAmounts ?? 0) + (state.scb.manualDepositInvalidAmounts ?? 0);
-  validation.runAt = new Date().toISOString();
-  validation.sourceCapturedAt = {
-    dp: state.dp.capturedAt,
-    wd: state.wd.capturedAt,
-    scb: state.scb.capturedAt
-  };
-
-  const bonusQueue = buildBonusQueue(
-    combinedDepositRows,
-    state.wd.rows,
-    state.scb.rows,
-    state.stopBns?.ids ?? []
-  );
-  bonusQueue.generatedAt = new Date().toISOString();
-  bonusQueue.sourceCapturedAt = { ...validation.sourceCapturedAt };
-
-  const bonusAudit = auditBonusPayments(
-    combinedDepositRows,
-    state.wd.rows,
-    state.scb.rows,
-    state.stopBns?.ids ?? []
-  );
-  bonusAudit.generatedAt = new Date().toISOString();
-  bonusAudit.sourceCapturedAt = { ...validation.sourceCapturedAt };
-
+  const { validation, bonusQueue, bonusAudit } = buildDerivedResults(state);
   await saveDerivedResults(validation, bonusQueue, bonusAudit);
   await refreshState();
   return validation;
@@ -764,32 +666,11 @@ async function scanAllPages() {
   setNotice("Menyiapkan tab DP, WD, dan SCB…");
 
   try {
-    const tabs = await findOrOpenPanelTabs();
-    setNotice("Memuat ulang halaman history DP, WD, dan SCB secara aman…");
-    await Promise.all(
-      PANEL_TYPES.map((type) => chrome.tabs.update(tabs[type].id, { url: PANEL_URLS[type] }))
-    );
-    const responses = await Promise.all(
-      PANEL_TYPES.map(async (type) => [type, await scanPanelAllPages(tabs[type], type)])
-    );
-
-    for (const [type, response] of responses) {
-      await saveSnapshot(type, createSnapshot(response));
-    }
+    const response = await chrome.runtime.sendMessage({ type: "BNS_MANUAL_REFRESH_RUN" });
+    if (!response?.ok) throw new Error(response?.message || "Scan All gagal.");
     await refreshState();
-    const validation = await calculateAndSaveValidation();
-    const rowSummary = PANEL_TYPES
-      .map((type) => {
-        const snapshot = state[type.toLocaleLowerCase("en-US")];
-        const pageCount = snapshot.source?.pagesScanned ?? 1;
-        const filterInfo = type === "SCB"
-          ? `, ${snapshot.manualDepositRows?.length ?? 0} manual DP${snapshot.source?.excludedInternalScbRows ? `, ${snapshot.source.excludedInternalScbRows} SCB lain diabaikan` : ""}`
-          : "";
-        return `${type} ${snapshot.rows.length}${pageCount > 1 ? ` (${pageCount} pages)` : ""}${filterInfo}`;
-      })
-      .join(" · ");
     setNotice(
-      `${rowSummary}. ${validation.stats.bns} transaksi BNS · ${state.bonusQueue.stats.ready} ID ready · ${state.bonusAudit.stats.issueRows} salah/double · ${state.bonusAudit.stats.missing} belum dibagi.`,
+      `${response.summary}. ${response.validationStats.bns} transaksi BNS · ${response.bonusQueueStats.ready} ID ready · ${response.bonusAuditStats.issueRows} bermasalah · ${response.bonusAuditStats.missing} belum dibagi.`,
       "success"
     );
   } catch (error) {
@@ -985,6 +866,9 @@ async function stopBonusBot() {
 
 elements.scanAllButton.addEventListener("click", scanAllPages);
 elements.scanButton.addEventListener("click", scanCurrentPage);
+elements.saveAutoRefreshButton.addEventListener("click", saveAutoRefreshSettings);
+elements.autoRefreshEnabled.addEventListener("change", () => { autoRefreshInputDirty = true; });
+elements.autoRefreshInterval.addEventListener("change", () => { autoRefreshInputDirty = true; });
 elements.validateButton.addEventListener("click", runValidation);
 elements.viewBnsButton.addEventListener("click", viewBns);
 elements.copyUsernamesButton.addEventListener("click", copyBnsUsernames);
@@ -1008,7 +892,16 @@ elements.paymentAuditSort.addEventListener("change", renderPaymentAudit);
 elements.copyAuditIssuesButton.addEventListener("click", copyAuditIssues);
 
 chrome.storage.onChanged.addListener((changes, areaName) => {
-  if (areaName === "local" && (changes.botState || changes.bonusQueue || changes.bonusAudit || changes.scb)) {
+  if (areaName === "local" && (
+    changes.botState ||
+    changes.bonusQueue ||
+    changes.bonusAudit ||
+    changes.scb ||
+    changes.dp ||
+    changes.wd ||
+    changes.autoRefreshSettings ||
+    changes.autoRefreshState
+  )) {
     refreshState().catch((error) => setNotice(error.message, "error"));
   }
 });

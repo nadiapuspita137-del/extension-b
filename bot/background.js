@@ -1,5 +1,16 @@
 import { BONUS_STATUS } from "../core/bonus.js";
 import { sortTransactions } from "../core/sort.js";
+import {
+  acquireRefreshLock,
+  AUTO_REFRESH_ALARM,
+  AUTO_REFRESH_RETRY_ALARM,
+  configureAutoRefresh,
+  ensureAutoRefreshAlarm,
+  releaseRefreshLock,
+  runAutoRefresh,
+  runManualRefresh,
+  scheduleRefreshAfterBot
+} from "./auto-refresh.js";
 
 const DEPOSIT_URL = "https://bfj.porta-assist.com/_SubAg_Sub/AddCreditRequest2.aspx";
 let advanceRunning = false;
@@ -85,8 +96,23 @@ function inheritedProcessedKeys(previous, queue) {
 }
 
 async function startBot(sortMode) {
-  const stored = await storageGet(["bonusQueue", "botState"]);
+  const stored = await storageGet(["bonusQueue", "botState", "autoRefreshState"]);
   if (stored.botState?.active) return stored.botState;
+  if (stored.autoRefreshState?.running) {
+    const lockAge = Date.now() - new Date(stored.autoRefreshState.updatedAt ?? 0).getTime();
+    if (Number.isFinite(lockAge) && lockAge >= 0 && lockAge < 15 * 60 * 1000) {
+      throw new Error("Refresh history sedang berjalan. Tunggu selesai sebelum menyalakan bot.");
+    }
+    await storageSet({
+      autoRefreshState: {
+        ...stored.autoRefreshState,
+        running: false,
+        status: "IDLE",
+        progress: "",
+        updatedAt: new Date().toISOString()
+      }
+    });
+  }
   if (!stored.bonusQueue) throw new Error("Bonus Queue belum ada. Jalankan Scan All + Validate dulu.");
 
   const processedKeys = inheritedProcessedKeys(stored.botState, stored.bonusQueue);
@@ -109,7 +135,9 @@ async function startBot(sortMode) {
 }
 
 async function stopBot(reason = "Dihentikan admin.") {
-  return updateBotState({ active: false, stage: "STOPPED", error: reason });
+  const state = await updateBotState({ active: false, stage: "STOPPED", error: reason });
+  await scheduleRefreshAfterBot();
+  return state;
 }
 
 async function migrateLegacyVerificationState() {
@@ -145,6 +173,7 @@ async function advanceAfterSubmit() {
     const candidates = readyRows(stored.bonusQueue, botState.sortMode, botState.processedKeys);
     if (!candidates.length) {
       await updateBotState({ active: false, stage: "COMPLETE", current: null, error: "" });
+      await scheduleRefreshAfterBot();
       return;
     }
     await openCurrentCandidate(botState, candidates[0]);
@@ -165,6 +194,23 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       const { botState } = await storageGet("botState");
       const authorized = Boolean(sender.tab?.id && botState?.depositTabId === sender.tab.id);
       return { ok: true, state: botState ?? null, authorized };
+    }
+    if (message?.type === "BNS_AUTO_REFRESH_CONFIGURE") {
+      if (sender.tab) throw new Error("Pengaturan Auto Refresh hanya boleh diubah dari popup extension.");
+      const configured = await configureAutoRefresh(message.enabled, message.intervalMinutes);
+      return { ok: true, ...configured };
+    }
+    if (message?.type === "BNS_MANUAL_REFRESH_RUN") {
+      if (sender.tab) throw new Error("Scan manual penuh hanya boleh dimulai dari popup extension.");
+      return await runManualRefresh();
+    }
+    if (message?.type === "BNS_REFRESH_LOCK_BEGIN") {
+      if (sender.tab) throw new Error("Refresh lock hanya boleh digunakan dari popup extension.");
+      return await acquireRefreshLock("MANUAL");
+    }
+    if (message?.type === "BNS_REFRESH_LOCK_END") {
+      if (sender.tab) throw new Error("Refresh lock hanya boleh digunakan dari popup extension.");
+      return { ok: true, state: await releaseRefreshLock("IDLE", "") };
     }
     if (message?.type === "BNS_BOT_FORM_STAGE") {
       const { botState } = await storageGet("botState");
@@ -218,4 +264,18 @@ chrome.tabs.onRemoved.addListener((tabId) => {
   });
 });
 
+chrome.alarms.onAlarm.addListener((alarm) => {
+  if (![AUTO_REFRESH_ALARM, AUTO_REFRESH_RETRY_ALARM].includes(alarm.name)) return;
+  runAutoRefresh().catch(() => {});
+});
+
+chrome.runtime.onInstalled.addListener(() => {
+  ensureAutoRefreshAlarm().catch(() => {});
+});
+
+chrome.runtime.onStartup.addListener(() => {
+  ensureAutoRefreshAlarm().catch(() => {});
+});
+
 migrateLegacyVerificationState();
+ensureAutoRefreshAlarm().catch(() => {});

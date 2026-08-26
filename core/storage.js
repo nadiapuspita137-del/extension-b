@@ -31,7 +31,16 @@ function removeStorage(keys) {
 }
 
 export async function loadState() {
-  return getStorage([...SNAPSHOT_KEYS, "validation", "bonusQueue", "bonusAudit", "stopBns", "botState"]);
+  return getStorage([
+    ...SNAPSHOT_KEYS,
+    "validation",
+    "bonusQueue",
+    "bonusAudit",
+    "stopBns",
+    "botState",
+    "autoRefreshSettings",
+    "autoRefreshState"
+  ]);
 }
 
 export async function saveSnapshot(pageType, snapshot) {

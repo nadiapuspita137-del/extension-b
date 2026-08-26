@@ -42,6 +42,31 @@
         Klik Scan All untuk mengambil DP, WD, dan SCB sekaligus.
       </div>
 
+      <section class="auto-refresh-section" aria-labelledby="auto-refresh-heading">
+        <div class="auto-refresh-main">
+          <label class="toggle-label" for="auto-refresh-enabled">
+            <input id="auto-refresh-enabled" type="checkbox" />
+            <span class="toggle-track" aria-hidden="true"><span></span></span>
+            <span>
+              <strong id="auto-refresh-heading">Auto Refresh</strong>
+              <small>Ditunda otomatis selama Bonus Input Bot aktif</small>
+            </span>
+          </label>
+          <label class="interval-label">
+            <span>Setiap</span>
+            <select id="auto-refresh-interval">
+              <option value="5">5 menit</option>
+              <option value="10">10 menit</option>
+              <option value="15" selected>15 menit</option>
+              <option value="30">30 menit</option>
+              <option value="60">60 menit</option>
+            </select>
+          </label>
+          <button id="save-auto-refresh-button" class="button secondary small" type="button">Apply</button>
+        </div>
+        <p id="auto-refresh-status" class="auto-refresh-status">Auto Refresh belum diaktifkan.</p>
+      </section>
+
       <section class="primary-actions" aria-label="Aksi utama">
         <button id="scan-all-button" class="button primary" type="button">Scan All + Validate</button>
         <button id="scan-button" class="button secondary" type="button">Scan Active Page</button>

@@ -10,6 +10,8 @@ import { configuredPageType, PANEL_URLS } from "../core/panels.js";
 import { BONUS_STATUS, buildBonusQueue, calculateBonus } from "../core/bonus.js";
 import { mergePageResponses } from "../core/pagination.js";
 import { AUDIT_ISSUE, AUDIT_STATUS, auditBonusPayments } from "../core/audit.js";
+import { buildDerivedResults, createSnapshot } from "../core/pipeline.js";
+import { AUTO_REFRESH_ALARM, configureAutoRefresh } from "../bot/auto-refresh.js";
 
 const output = document.querySelector("#output");
 const failures = [];
@@ -60,6 +62,24 @@ check(sortTransactions(sortable, SORT_ORDER.DP_ASC)[0].amount === 50_000, "DP as
 check(configuredPageType(PANEL_URLS.DP) === "DP", "one-click DP URL mapping");
 check(configuredPageType(PANEL_URLS.WD) === "WD", "one-click WD URL mapping");
 check(configuredPageType(PANEL_URLS.SCB) === "SCB", "one-click SCB URL mapping");
+const pipelineTimestamp = "2026-08-26T01:00:00.000Z";
+const pipelineDp = createSnapshot({
+  pageType: "DP",
+  rows: [{ username: "PipelineUser", amountText: "75.000", datetime: "26/08/2026" }],
+  sourceRowCount: 1,
+  pagination: { pagesScanned: 1, totalPages: 1, totalRecords: 1 },
+  source: { columns: {} }
+}, pipelineTimestamp);
+const pipelineEmpty = { rows: [], capturedAt: pipelineTimestamp };
+check(
+  buildDerivedResults({
+    dp: pipelineDp,
+    wd: pipelineEmpty,
+    scb: { ...pipelineEmpty, manualDepositRows: [] },
+    stopBns: { ids: [] }
+  }, pipelineTimestamp).bonusQueue.stats.ready === 1,
+  "shared refresh pipeline"
+);
 check(calculateBonus(75_000) === 7_000, "bonus rounded down to thousands");
 const bonusQueue = buildBonusQueue([dp(75_000), dp(600_000)], [], []);
 check(bonusQueue.rows.length === 1, "one bonus row per unique ID");
@@ -75,11 +95,71 @@ check(doubleAudit.rows[0].issues.includes(AUDIT_ISSUE.DOUBLE_BONUS), "double bon
 check(doubleAudit.rows[0].issues.includes(AUDIT_ISSUE.OVERPAID), "overpaid bonus audit");
 const missingAudit = auditBonusPayments([dp(75_000)], [], []);
 check(missingAudit.rows[0].status === AUDIT_STATUS.MISSING, "missing bonus audit");
+const cappedAudit = auditBonusPayments(
+  [{ ...present("millionplus"), amount: 2_000_000 }],
+  [],
+  [{ ...present("millionplus"), amount: 100_000 }]
+);
+check(cappedAudit.rows[0].status === AUDIT_STATUS.CORRECT, "audit accepts 1m+ DP");
+check(cappedAudit.rows[0].expectedBonus === 100_000, "audit caps 1m+ bonus at 100k");
+const wdOverpaidAudit = auditBonusPayments(
+  [{ ...present("bfj@dimas2003"), amount: 50_000 }],
+  [{ ...present("bfj@dimas2003"), amount: 2_100 }],
+  [{ ...present("bfj@dimas2003"), amount: 10_000 }]
+);
+check(wdOverpaidAudit.rows[0].expectedBonus === 5_000, "WD audit keeps DP nominal baseline");
+check(wdOverpaidAudit.rows[0].issues.includes(AUDIT_ISSUE.FOUND_WD), "WD audit keeps rule violation");
+check(wdOverpaidAudit.rows[0].issues.includes(AUDIT_ISSUE.OVERPAID), "WD audit also detects overpayment");
+const bonusBeforeWdAudit = auditBonusPayments(
+  [{ ...present("ordered"), amount: 100_000, datetime: "26/08/2026 08:00" }],
+  [{ ...present("ordered"), amount: 1, datetime: "26/08/2026 11:00" }],
+  [{ ...present("ordered"), amount: 10_000, datetime: "26/08/2026 09:00" }]
+);
+check(bonusBeforeWdAudit.rows[0].status === AUDIT_STATUS.CORRECT, "bonus before WD is valid in audit");
+const wdBeforeBonusAudit = auditBonusPayments(
+  [{ ...present("ordered"), amount: 100_000, datetime: "26/08/2026 08:00" }],
+  [{ ...present("ordered"), amount: 1, datetime: "26/08/2026 09:00" }],
+  [{ ...present("ordered"), amount: 10_000, datetime: "26/08/2026 11:00" }]
+);
+check(wdBeforeBonusAudit.rows[0].issues.includes(AUDIT_ISSUE.FOUND_WD), "WD before bonus violates audit");
 const mergedPages = mergePageResponses([
   { rows: [{ username: "a", rrn: "r1" }], sourceRowCount: 1, pagination: { totalRecords: 2 }, source: {} },
   { rows: [{ username: "b", rrn: "r2" }], sourceRowCount: 1, pagination: {}, source: {} }
 ]);
 check(mergedPages.rows.length === 2 && mergedPages.pagination.pagesScanned === 2, "multi-page response merge");
+const reusedReferenceRows = mergePageResponses([{
+  pageType: "SCB",
+  rows: [
+    {
+      username: "DIMAS2003",
+      amountText: "50.000",
+      datetime: "26/08/2026 10:00",
+      rrn: "shared-reference",
+      toBank: "PrabuPay bolapelangi2_oauser"
+    },
+    {
+      username: "DIMAS2003",
+      amountText: "10.000",
+      datetime: "26/08/2026 10:01",
+      rrn: "shared-reference",
+      toBank: "SCB A BONUS DEPOSIT HARIAN 01"
+    }
+  ],
+  sourceRowCount: 2,
+  pagination: { currentPage: 1, totalPages: 1, totalRecords: 2 },
+  source: { columns: { toBank: 4 } }
+}]);
+const reusedReferenceScb = createSnapshot(reusedReferenceRows, pipelineTimestamp);
+const reusedReferenceAudit = buildDerivedResults({
+  dp: pipelineEmpty,
+  wd: pipelineEmpty,
+  scb: reusedReferenceScb,
+  stopBns: { ids: [] }
+}, pipelineTimestamp).bonusAudit;
+check(reusedReferenceScb.manualDepositRows.length === 1, "manual DP survives reused RRN");
+check(reusedReferenceScb.rows.length === 1, "bonus payment survives reused RRN");
+check(reusedReferenceAudit.stats.overpaid === 1, "50k DP with 10k bonus is overpaid");
+check(reusedReferenceAudit.stats.noDp === 0, "reused RRN does not become no-DP audit");
 
 let scannerListener;
 globalThis.chrome.runtime = {
@@ -218,5 +298,35 @@ for (let attempt = 0; attempt < 20 && !submitted; attempt += 1) {
 check(botMessages.includes("BNS_BOT_FINAL_SUBMIT"), "admin final submit is reported to controller");
 check(submitted === 1, "final submit proceeds once after admin click");
 
+const autoValues = {};
+const autoAlarms = new Map();
+globalThis.chrome.storage = {
+  local: {
+    async get(keys) {
+      const requested = Array.isArray(keys) ? keys : [keys];
+      return Object.fromEntries(
+        requested.filter((key) => key in autoValues).map((key) => [key, autoValues[key]])
+      );
+    },
+    async set(value) { Object.assign(autoValues, value); }
+  }
+};
+globalThis.chrome.alarms = {
+  async clear(name) { return autoAlarms.delete(name); },
+  async create(name, info) {
+    autoAlarms.set(name, {
+      name,
+      periodInMinutes: info.periodInMinutes,
+      scheduledTime: Date.now() + (info.delayInMinutes ?? info.periodInMinutes) * 60_000
+    });
+  },
+  async get(name) { return autoAlarms.get(name); }
+};
+await configureAutoRefresh(true, 10);
+check(autoValues.autoRefreshSettings?.intervalMinutes === 10, "Auto Refresh interval persistence");
+check(autoAlarms.get(AUTO_REFRESH_ALARM)?.periodInMinutes === 10, "Auto Refresh alarm schedule");
+
 document.body.dataset.status = failures.length ? "fail" : "pass";
-output.textContent = failures.length ? `FAIL\n${failures.join("\n")}` : "PASS: core + scanner + deposit bot + bonus audit browser smoke tests";
+output.textContent = failures.length
+  ? `FAIL\n${failures.join("\n")}`
+  : "PASS: core + scanner + deposit bot + bonus audit + auto refresh browser smoke tests";

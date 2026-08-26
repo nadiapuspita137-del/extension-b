@@ -1,8 +1,11 @@
-import {
-  calculateBonus,
-  MAX_BONUS_DP,
-  MIN_BONUS_DP
-} from "./bonus.js";
+import { calculateBonus } from "./bonus.js";
+
+// Bonus Audit intentionally has a wider range than Validation/Bonus Queue.
+// At 1,000,000 DP the 10% bonus reaches its 100,000 cap; larger DP values
+// remain auditable at the same capped bonus.
+export const AUDIT_MIN_DP = 50_000;
+export const AUDIT_FULL_BONUS_DP = 1_000_000;
+export const AUDIT_RULES_VERSION = "min-50k-no-upper-cap-100k-wd-order-v2";
 
 export const AUDIT_STATUS = Object.freeze({
   CORRECT: "CORRECT",
@@ -37,10 +40,53 @@ function groupRows(rows) {
   return groups;
 }
 
+export function parseAuditTimestamp(value) {
+  const text = String(value ?? "").trim();
+  let match = text.match(
+    /\b(\d{1,2})[\/.\-](\d{1,2})[\/.\-](\d{4})(?:\s+(\d{1,2}):(\d{2})(?::(\d{2}))?)?\b/
+  );
+  if (match) {
+    return Date.UTC(
+      Number(match[3]),
+      Number(match[2]) - 1,
+      Number(match[1]),
+      Number(match[4] ?? 0),
+      Number(match[5] ?? 0),
+      Number(match[6] ?? 0)
+    );
+  }
+
+  match = text.match(
+    /\b(\d{4})[\/.\-](\d{1,2})[\/.\-](\d{1,2})(?:\s+(\d{1,2}):(\d{2})(?::(\d{2}))?)?\b/
+  );
+  if (!match) return null;
+  return Date.UTC(
+    Number(match[1]),
+    Number(match[2]) - 1,
+    Number(match[3]),
+    Number(match[4] ?? 0),
+    Number(match[5] ?? 0),
+    Number(match[6] ?? 0)
+  );
+}
+
+function wdPrecedesBonus(wdRows, bonusRows) {
+  if (!wdRows?.length || !bonusRows?.length) return false;
+  const wdTimes = wdRows.map((row) => parseAuditTimestamp(row.datetime));
+  const bonusTimes = bonusRows.map((row) => parseAuditTimestamp(row.datetime));
+
+  // Missing/invalid timestamps cannot prove that the bonus preceded WD.
+  if (wdTimes.some((time) => time === null) || bonusTimes.some((time) => time === null)) return true;
+
+  const firstWd = Math.min(...wdTimes);
+  const lastBonus = Math.max(...bonusTimes);
+  return firstWd <= lastBonus;
+}
+
 export function auditBonusPayments(dpRows, wdRows, scbRows, stopBnsRows = []) {
   const dpGroups = groupRows(dpRows);
   const scbGroups = groupRows(scbRows);
-  const wdKeys = new Set((wdRows ?? []).map((row) => row.usernameKey).filter(Boolean));
+  const wdGroups = groupRows(wdRows);
   const stopKeys = new Set((stopBnsRows ?? []).map((row) => row.usernameKey).filter(Boolean));
   const usernameKeys = new Set([...dpGroups.keys(), ...scbGroups.keys()]);
   const rows = [];
@@ -48,12 +94,17 @@ export function auditBonusPayments(dpRows, wdRows, scbRows, stopBnsRows = []) {
   for (const usernameKey of usernameKeys) {
     const dpGroup = dpGroups.get(usernameKey);
     const actualGroup = scbGroups.get(usernameKey);
+    const wdGroup = wdGroups.get(usernameKey);
     const maximumDp = dpGroup?.rows.reduce((maximum, row) => Math.max(maximum, row.amount), -Infinity) ?? null;
-    const inRange = Number.isFinite(maximumDp) && maximumDp >= MIN_BONUS_DP && maximumDp < MAX_BONUS_DP;
-    const foundWd = wdKeys.has(usernameKey);
+    const inRange = Number.isFinite(maximumDp) && maximumDp >= AUDIT_MIN_DP;
+    const hasWd = Boolean(wdGroup);
+    const foundWd = wdPrecedesBonus(wdGroup?.rows, actualGroup?.rows);
     const stopped = stopKeys.has(usernameKey);
-    const shouldReceive = inRange && !foundWd && !stopped;
-    const expectedBonus = shouldReceive ? calculateBonus(maximumDp) : null;
+    const shouldReceive = inRange && !hasWd && !stopped;
+    // Keep the nominal check independent from eligibility exclusions. An ID
+    // can violate the WD/Stop BNS rule and still have an over/under payment
+    // compared with the bonus amount implied by its DP.
+    const expectedBonus = inRange ? calculateBonus(maximumDp) : null;
     const actualAmounts = actualGroup?.rows.map((row) => row.amount) ?? [];
     const actualTotal = actualAmounts.reduce((total, amount) => total + amount, 0);
     const issues = [];
@@ -61,12 +112,11 @@ export function auditBonusPayments(dpRows, wdRows, scbRows, stopBnsRows = []) {
     if (actualAmounts.length > 0) {
       if (actualAmounts.length > 1) issues.push(AUDIT_ISSUE.DOUBLE_BONUS);
       if (!dpGroup) issues.push(AUDIT_ISSUE.NO_DP);
-      else if (maximumDp < MIN_BONUS_DP) issues.push(AUDIT_ISSUE.OUT_OF_RANGE_BELOW);
-      else if (maximumDp >= MAX_BONUS_DP) issues.push(AUDIT_ISSUE.OUT_OF_RANGE_ABOVE);
+      else if (maximumDp < AUDIT_MIN_DP) issues.push(AUDIT_ISSUE.OUT_OF_RANGE_BELOW);
       if (foundWd) issues.push(AUDIT_ISSUE.FOUND_WD);
       if (stopped) issues.push(AUDIT_ISSUE.STOP_BNS);
-      if (shouldReceive && actualTotal > expectedBonus) issues.push(AUDIT_ISSUE.OVERPAID);
-      if (shouldReceive && actualTotal < expectedBonus) issues.push(AUDIT_ISSUE.UNDERPAID);
+      if (inRange && actualTotal > expectedBonus) issues.push(AUDIT_ISSUE.OVERPAID);
+      if (inRange && actualTotal < expectedBonus) issues.push(AUDIT_ISSUE.UNDERPAID);
     } else if (shouldReceive) {
       issues.push(AUDIT_ISSUE.MISSING_BONUS);
     } else {
@@ -133,5 +183,5 @@ export function auditBonusPayments(dpRows, wdRows, scbRows, stopBnsRows = []) {
     stats.actualTotal += row.actualTotal;
   }
   stats.difference = stats.actualTotal - stats.expectedTotal;
-  return { rows, stats };
+  return { rulesVersion: AUDIT_RULES_VERSION, rows, stats };
 }

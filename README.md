@@ -23,6 +23,28 @@ Tidak ada dependency atau build step untuk menjalankan extension.
 5. Gunakan sort/filter, **View BNS**, **Copy BNS Usernames**, atau **Copy BNS Full Detail**.
 6. **Scan Active Page** dan **Run Validation** tetap tersedia sebagai fallback manual.
 7. Gunakan **Clear All Snapshot** untuk menghapus snapshot tanpa menghapus daftar Stop BNS.
+
+## Auto Refresh
+
+Auto Refresh bersifat opsional dan menggunakan scheduler `chrome.alarms`, sehingga jadwal tetap bekerja walaupun popup extension ditutup. Pilihan interval yang tersedia adalah 5, 10, 15, 30, atau 60 menit.
+
+Cara menggunakan:
+
+1. aktifkan toggle **Auto Refresh**;
+2. pilih interval;
+3. klik **Apply**;
+4. lihat status terakhir dan perkiraan jadwal berikutnya di bawah kontrol.
+
+Setiap jadwal menjalankan proses yang sama dengan **Scan All + Validate**: reload ketiga halaman history ke page 1, scan seluruh pagination, membuat snapshot baru, lalu memperbarui validation, Bonus Queue, dan Payment Audit secara atomik. Jika salah satu scan gagal, snapshot lama tetap dipertahankan dan error ditampilkan.
+
+Auto Refresh tidak mengganggu Bonus Input Bot:
+
+- ketika bot aktif, refresh ditunda tanpa membuka atau memindahkan tab history;
+- setelah bot berhenti, refresh yang tertunda dijadwalkan ulang sekitar 30 detik kemudian;
+- ketika refresh sedang berjalan, tombol BOT ON dan aksi yang dapat mengubah queue dinonaktifkan;
+- Auto Refresh tidak pernah menyentuh tab `AddCreditRequest2.aspx` milik bot.
+
+Chrome dapat menjalankan alarm sedikit lebih lambat dari jadwal. Alarm juga tidak membangunkan komputer yang sedang sleep; setelah komputer aktif kembali, jadwal akan dilanjutkan.
 8. Untuk pembagian, pilih urutan Bonus Queue lalu klik **BOT ON**. Periksa form yang disorot dan klik final **Submit**.
 
 URL panel yang digunakan oleh mode satu klik:
@@ -171,11 +193,13 @@ Dengan demikian DP terbesar per username dicari dari gabungan **DP QRIS + DP man
 
 Setiap **Scan All + Validate** membandingkan bonus yang seharusnya dengan pembayaran aktual pada SCB bonus harian. Audit bekerja per username per laporan hari ini dan dapat memberi lebih dari satu temuan pada ID yang sama:
 
+Range Bonus Audit sengaja berbeda dari Validation dan Bonus Queue. Audit menerima DP terbesar mulai **50.000 tanpa batas atas**. Bonus dihitung 10%, dibulatkan turun ke ribuan, minimal **5.000**, dan maksimal **100.000**. Karena itu DP **1.000.000 atau lebih** tetap memiliki bonus audit sebesar 100.000. Validation dan Bonus Queue tetap memakai range 50.000 sampai kurang dari 500.000.
+
 - `DOUBLE`: terdapat lebih dari satu transaksi bonus harian;
 - `NOMINAL LEBIH` / `NOMINAL KURANG`: total aktual tidak sama dengan 10% dari DP terbesar yang dibulatkan ke bawah ribuan;
 - `TANPA DP`: ada bonus aktual tetapi username tidak ditemukan pada DP;
-- `MAX < 50K` / `MAX >= 500K`: bonus dibayar untuk DP di luar range;
-- `ADA WD`: bonus dibayar meskipun username ditemukan di WD;
+- `MAX < 50K`: bonus dibayar untuk DP di bawah batas minimal audit;
+- `ADA WD`: WD terjadi lebih dulu (atau pada waktu yang sama) sebelum bonus. Jika bonus diterima lebih dulu lalu baru WD, audit tidak menganggapnya pelanggaran;
 - `STOP BNS`: bonus dibayar kepada ID pengecualian;
 - `BELUM DIBAGI`: username memenuhi rule tetapi belum ditemukan pada SCB bonus harian;
 - `BENAR`: tepat satu transaksi dan nominalnya sesuai.
@@ -213,7 +237,7 @@ Node.js diperlukan hanya untuk development test:
 npm test
 ```
 
-Test mencakup normalisasi nominal, seluruh sembilan case dari brief, transaksi duplikat, status gabungan WD+SCB, deteksi/extraction DP/WD/SCB, unique-ID bonus queue, DP terbesar, pembulatan bonus ke bawah, dan pengecualian history/WD/SB.
+Test mencakup normalisasi nominal, seluruh sembilan case dari brief, transaksi duplikat, status gabungan WD+SCB, deteksi/extraction DP/WD/SCB, shared snapshot pipeline, konfigurasi Auto Refresh, refresh yang ditunda saat bot aktif, unique-ID bonus queue, DP terbesar, pembulatan bonus ke bawah, dan pengecualian history/WD/SB.
 
 ## Struktur file
 
@@ -225,6 +249,7 @@ popup.css              Tampilan popup
 popup.js               One-click scan, queue, kontrol bot, Stop BNS, copy
 bot/background.js      Controller antrean sesi dan perpindahan ID setelah Submit
 bot/deposit-assistant.js  Prefill form dan guard final Submit
+bot/auto-refresh.js    Scheduler alarm, refresh lock, dan proteksi bot
 content/scanner.js     Table finder, page detector, header-driven extractor
 core/normalize.js      Normalisasi username dan nominal
 core/validator.js      Rule eligibility dan presence validation
@@ -233,6 +258,8 @@ core/audit.js          Audit expected-vs-actual, double, nominal, dan rule
 core/sort.js           Natural ID sort dan nominal DP sort
 core/panels.js         URL dan mapping tab untuk mode satu klik
 core/pagination.js     Penggabungan multi-page dengan identitas RRN/Reference
+core/panel-scan.js     Orkestrasi scan multi-page yang dipakai popup/background
+core/pipeline.js       Snapshot filtering dan derived validation bersama
 core/storage.js        Wrapper chrome.storage.local
 tests/                 Test normalization, validator, dan scanner
 ```
